@@ -1,8 +1,5 @@
-using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Services.Rates;
@@ -33,7 +30,7 @@ namespace BTCPayServer.Rating.Providers
             var jarray = (JArray)(await response.Content.ReadAsAsync<JObject>(cancellationToken))["data"];
             var tickers = jarray.ToObject<Ticker[]>();
             return tickers
-                .Where(t => t.bid is not null && t.ask is not null)
+                .Where(t => t.bid is not null && t.ask is not null && t.bid <= t.ask)
                 .Select(t => new PairRate(CurrencyPair.Parse(t.pairNormalized), new BidAsk(t.bid.Value, t.ask.Value))).ToArray();
         }
     }

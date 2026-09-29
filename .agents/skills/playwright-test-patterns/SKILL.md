@@ -1,0 +1,22 @@
+---
+name: playwright-test-patterns
+description: Use when writing, refactoring, running, or debugging Playwright tests in BTCPayServer. Covers local test setup, PMO/Page Model Object usage, selector encapsulation, and avoiding over-engineering.
+---
+
+# Playwright Test Patterns
+
+Follow [Testing](../../../docs/maintainers/local-development.md#testing) and [Coding conventions](../../../docs/maintainers/coding-conventions.md#frontend-selectors).
+
+## Running and Debugging Tests
+
+- Run focused tests directly with `dotnet test`; do not use `.github/scripts/run-tests.sh`, which rebuilds the Docker test environment and is too slow for local iteration.
+- If the test dependencies are not already running, start them with `docker-compose up -d dev` from the `BTCPayServer.Tests` directory.
+- Always set `PLAYWRIGHT_HEADLESS=true` when running Playwright tests so browser windows do not interrupt the user.
+- Run tests directly on the host rather than through Docker Compose. From the repository root, run a specific test with:
+
+```sh
+PLAYWRIGHT_HEADLESS=true dotnet test --project BTCPayServer.Tests/BTCPayServer.Tests.csproj --filter-method BTCPayServer.Tests.BitpayTests.CanUsePairing
+```
+
+- Replace the value passed to `--filter-method` with the fully qualified test method to run another test.
+- Run the relevant test or test project build after changing Playwright selectors or Page Model Objects.

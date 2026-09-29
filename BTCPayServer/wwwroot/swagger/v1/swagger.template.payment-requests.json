@@ -79,6 +79,16 @@
                     },
                     "403": {
                         "description": "If you are authenticated but forbidden to add new payment requests"
+                    },
+                    "409": {
+                        "description": "Error codes: `duplicate-reference-id`",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ProblemDetails"
+                                }
+                            }
+                        }
                     }
                 },
                 "requestBody": {
@@ -101,16 +111,13 @@
                 ]
             }
         },
-        "/api/v1/stores/{storeId}/payment-requests/{paymentRequestId}": {
+        "/api/v1/payment-requests/{paymentRequestId}": {
             "get": {
                 "tags": [
                     "Payment Requests"
                 ],
                 "summary": "Get payment request",
                 "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    },
                     {
                         "name": "paymentRequestId",
                         "in": "path",
@@ -121,7 +128,7 @@
                         }
                     }
                 ],
-                "description": "View information about the specified payment request",
+                "description": "View information about the specified payment request. The store is resolved automatically from the payment request.",
                 "operationId": "PaymentRequests_GetPaymentRequest",
                 "responses": {
                     "200": {
@@ -155,12 +162,9 @@
                     "Payment Requests"
                 ],
                 "summary": "Archive payment request",
-                "description": "Archives the specified payment request.",
+                "description": "Archives the specified payment request. The store is resolved automatically from the payment request.",
                 "operationId": "PaymentRequests_ArchivePaymentRequest",
                 "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    },
                     {
                         "name": "paymentRequestId",
                         "in": "path",
@@ -208,9 +212,6 @@
                 "summary": "Update payment request",
                 "parameters": [
                     {
-                        "$ref": "#/components/parameters/StoreId"
-                    },
-                    {
                         "name": "paymentRequestId",
                         "in": "path",
                         "required": true,
@@ -220,7 +221,7 @@
                         }
                     }
                 ],
-                "description": "Update a payment request",
+                "description": "Update a payment request. The store is resolved automatically from the payment request.",
                 "operationId": "PaymentRequests_UpdatePaymentRequest",
                 "responses": {
                     "200": {
@@ -245,6 +246,16 @@
                     },
                     "403": {
                         "description": "If you are authenticated but forbidden to update the payment request"
+                    },
+                    "409": {
+                        "description": "Error codes: `duplicate-reference-id`",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ProblemDetails"
+                                }
+                            }
+                        }
                     }
                 },
                 "requestBody": {
@@ -267,16 +278,13 @@
                 ]
             }
         },
-        "/api/v1/stores/{storeId}/payment-requests/{paymentRequestId}/pay": {
+        "/api/v1/payment-requests/{paymentRequestId}/pay": {
             "post": {
                 "tags": [
                     "Payment Requests"
                 ],
                 "summary": "Create a new invoice for the payment request",
                 "parameters": [
-                    {
-                        "$ref": "#/components/parameters/StoreId"
-                    },
                     {
                         "name": "paymentRequestId",
                         "in": "path",
@@ -288,7 +296,7 @@
                     }
                 ],
                 "operationId": "PaymentRequests_Pay",
-                "description": "Create a new invoice for the payment request, or reuse an existing one",
+                "description": "Create a new invoice for the payment request, or reuse an existing one. The store is resolved automatically from the payment request.",
                 "requestBody": {
                     "description": "Invoice creation request",
                     "content": {

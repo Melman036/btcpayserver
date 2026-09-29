@@ -26,9 +26,7 @@ services:
       TEST_CUSTOMERLIGHTNINGD: "type=clightning;server=unix://etc/customer_lightningd_datadir/lightning-rpc"
       TEST_MERCHANTLND: "http://merchant_lnd:8080/"
       TESTS_INCONTAINER: "true"
-      TESTS_SSHCONNECTION: "root@sshd:22"
-      TESTS_SSHPASSWORD: ""
-      TESTS_SSHKEYFILE: ""
+      PLAYWRIGHT_HEADLESS: "true"
       TESTS_SOCKSENDPOINT: "tor:9050"
     expose:
       - "80"
@@ -41,7 +39,6 @@ services:
       custom:
         ipv4_address: 172.23.0.18
     volumes:
-      - "sshd_datadir:/root/.ssh"
       - "customer_lightningd_datadir:/etc/customer_lightningd_datadir"
       - "merchant_lightningd_datadir:/etc/merchant_lightningd_datadir"
 
@@ -56,23 +53,11 @@ services:
       - merchant_lightningd
       - customer_lnd
       - merchant_lnd
-      - sshd
       - tor
       - mailpit
 
-  sshd:
-    build:
-        context: .
-        dockerfile: sshd.Dockerfile
-    ports:
-        - "21622:22"
-    expose:
-        - 22
-    volumes:
-        - "sshd_datadir:/root/.ssh"
-
   devlnd:
-    image: btcpayserver/bitcoin:29.1
+    image: btcpayserver/bitcoin:31.1-1
     environment:
       BITCOIN_NETWORK: regtest
       BITCOIN_WALLETDIR: "/data/wallets"
@@ -81,6 +66,7 @@ services:
         connect=bitcoind:39388
         fallbackfee=0.0002
         rpcallowip=0.0.0.0/0
+        unsafesqlitesync=1
     depends_on:
       - nbxplorer
       - postgres
@@ -99,7 +85,7 @@ services:
       MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
   nbxplorer:
-    image: nicolasdorier/nbxplorer:2.5.29
+    image: nicolasdorier/nbxplorer:2.6.18
     restart: unless-stopped
     ports:
       - "32838:32838"
@@ -124,9 +110,10 @@ services:
 
   bitcoind:
     restart: unless-stopped
-    image: btcpayserver/bitcoin:29.1
+    image: btcpayserver/bitcoin:31.1-1
     environment:
       BITCOIN_NETWORK: regtest
+      BITCOIN_RPCUSERS: lnd
       BITCOIN_WALLETDIR: "/data/wallets"
       BITCOIN_EXTRA_ARGS: |-
         rpcuser=ceiwHEbqWI83
@@ -141,6 +128,7 @@ services:
         deprecatedrpc=signrawtransaction
         fallbackfee=0.0002
         minrelaytxfee=0.00001000
+        unsafesqlitesync=1
     ports:
       - "43782:43782"
       - "39388:39388"
@@ -153,7 +141,7 @@ services:
       - "bitcoin_datadir:/data"
 
   customer_lightningd:
-    image: btcpayserver/lightning:v25.05
+    image: btcpayserver/lightning:v26.06.1
     stop_signal: SIGKILL
     restart: unless-stopped
     environment:
@@ -182,7 +170,7 @@ services:
       - bitcoind
 
   merchant_lightningd:
-    image: btcpayserver/lightning:v25.05
+    image: btcpayserver/lightning:v26.06.1
     stop_signal: SIGKILL
     restart: unless-stopped
     environment:
@@ -216,27 +204,28 @@ services:
         POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "39372:5432"
+    command: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
     expose:
       - "5432"
     volumes:
       - "postgres_test_datadir:/var/lib/postgresql"
 
   merchant_lnd:
-    image: btcpayserver/lnd:v0.19.3-beta
+    image: btcpayserver/lnd:v0.21.3-beta-2
     restart: unless-stopped
     environment:
       LND_CHAIN: "btc"
       LND_ENVIRONMENT: "regtest"
       LND_EXPLORERURL: "http://nbxplorer:32838/"
       LND_REST_LISTEN_HOST: http://merchant_lnd:8080
+      RPCUSER_FILE: /deps/.bitcoin/RPCUsers/lnd
       LND_EXTRA_ARGS: |
         restlisten=merchant_lnd:8080
         rpclisten=127.0.0.1:10008
         rpclisten=merchant_lnd:10009
         bitcoin.node=bitcoind
         bitcoind.rpchost=bitcoind:43782
-        bitcoind.rpcuser=ceiwHEbqWI83
-        bitcoind.rpcpass=DwubwWsoo3
+        bitcoind.rpcuser=lnd
         bitcoind.zmqpubrawblock=tcp://bitcoind:28332
         bitcoind.zmqpubrawtx=tcp://bitcoind:28333
         externalip=merchant_lnd:9735
@@ -260,21 +249,21 @@ services:
       - bitcoind
 
   customer_lnd:
-    image: btcpayserver/lnd:v0.19.3-beta
+    image: btcpayserver/lnd:v0.21.3-beta-2
     restart: unless-stopped
     environment:
       LND_CHAIN: "btc"
       LND_ENVIRONMENT: "regtest"
       LND_EXPLORERURL: "http://nbxplorer:32838/"
       LND_REST_LISTEN_HOST: http://customer_lnd:8080
+      RPCUSER_FILE: /deps/.bitcoin/RPCUsers/lnd
       LND_EXTRA_ARGS: |
         restlisten=customer_lnd:8080
         rpclisten=127.0.0.1:10008
         rpclisten=customer_lnd:10009
         bitcoin.node=bitcoind
         bitcoind.rpchost=bitcoind:43782
-        bitcoind.rpcuser=ceiwHEbqWI83
-        bitcoind.rpcpass=DwubwWsoo3
+        bitcoind.rpcuser=lnd
         bitcoind.zmqpubrawblock=tcp://bitcoind:28332
         bitcoind.zmqpubrawtx=tcp://bitcoind:28333
         externalip=customer_lnd:9735
@@ -298,25 +287,20 @@ services:
 
   tor:
     restart: unless-stopped
-    image: btcpayserver/tor:0.4.6.5
+    image: btcpayserver/tor:0.4.9.13
     container_name: tor
     environment:
         TOR_PASSWORD: btcpayserver
-    ports:
-        - "9050:9050" # SOCKS
-        - "9051:9051" # Tor Control
     volumes:
         - "tor_datadir:/home/tor/.tor"
         - "torrcdir:/usr/local/etc/tor"
         - "tor_servicesdir:/var/lib/tor/hidden_services"
 
 volumes:
-    sshd_datadir:
     bitcoin_datadir:
     elementsd_liquid_datadir:
     customer_lightningd_datadir:
     merchant_lightningd_datadir:
-    lightning_charge_datadir:
     customer_lnd_datadir:
     merchant_lnd_datadir:
     postgres_test_datadir:

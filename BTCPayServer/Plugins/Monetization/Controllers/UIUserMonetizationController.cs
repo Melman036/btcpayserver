@@ -3,15 +3,16 @@ using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client;
+using BTCPayServer.Controllers;
 using BTCPayServer.Data;
 using BTCPayServer.Data.Subscriptions;
 using BTCPayServer.Plugins.Subscriptions;
 using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Localization;
 
 namespace BTCPayServer.Plugins.Monetization.Controllers;
 
@@ -21,10 +22,12 @@ public class UIUserMonetizationController(
     ApplicationDbContext ctx,
     MonetizationSettings settings,
     PoliciesSettings policies,
-    UserManager<ApplicationUser> userManager,
-    LinkGenerator linkGenerator
+    LinkGenerator linkGenerator,
+    IStringLocalizer stringLocalizer
     ) : Controller
 {
+    public IStringLocalizer StringLocalizer { get; } = stringLocalizer;
+
     [HttpGet("~/monetization/new-user")]
     [AllowAnonymous]
     public async Task<IActionResult> NewUser()
@@ -55,10 +58,13 @@ public class UIUserMonetizationController(
     {
         if (settings.OfferingId is not { } offeringId)
             return NotFound();
-        var userId = userManager.GetUserId(User);
+        var userId = User.GetId();
         var sub = await ctx.Subscribers.GetBySelector(offeringId, CustomerSelector.ByIdentity(SubscriberDataExtensions.IdentityType, userId));
         if (sub is null)
-            return NotFound();
+        {
+            TempData[WellKnownTempData.ErrorMessage] = StringLocalizer["No billing subscription is associated with your account."].Value;
+            return RedirectToAction(nameof(UIManageController.Index), "UIManage", new { area = "" });
+        }
 
         // With fast redirect, if we detect there is no can-access and we have only one plan change,
         // we go straight to a hard migration. (Which reimburses the user for the unused part of his current plan)

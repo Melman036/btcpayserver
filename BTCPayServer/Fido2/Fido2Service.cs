@@ -1,26 +1,21 @@
+#nullable enable
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using BTCPayServer.Data;
 using BTCPayServer.Fido2.Models;
+using Dapper;
 using ExchangeSharp;
 using Fido2NetLib;
 using Fido2NetLib.Objects;
 using Microsoft.EntityFrameworkCore;
-using NBitcoin;
-using Newtonsoft.Json.Linq;
-using static BTCPayServer.Fido2.Models.Fido2CredentialBlob;
 
 namespace BTCPayServer.Fido2
 {
     public class Fido2Service
     {
-        private static readonly ConcurrentDictionary<string, CredentialCreateOptions> CreationStore =
-            new ConcurrentDictionary<string, CredentialCreateOptions>();
-        private static readonly ConcurrentDictionary<string, AssertionOptions> LoginStore =
-            new ConcurrentDictionary<string, AssertionOptions>();
         private readonly ApplicationDbContextFactory _contextFactory;
         private readonly IFido2 _fido2;
         private readonly Fido2Configuration _fido2Configuration;
@@ -32,7 +27,7 @@ namespace BTCPayServer.Fido2
             _fido2Configuration = fido2Configuration;
         }
 
-        public async Task<CredentialCreateOptions> RequestCreation(string userId)
+        public async Task<CredentialCreateOptions?> RequestCreation(string userId, Fido2Credential.CredentialType credType)
         {
             await using var dbContext = _contextFactory.CreateContext();
             var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
@@ -45,73 +40,70 @@ namespace BTCPayServer.Fido2
             // 2. Get user existing keys by username
             var existingKeys =
                 user.Fido2Credentials
-                    .Where(credential => credential.Type == Fido2Credential.CredentialType.FIDO2)
-                    .Select(c => c.GetFido2Blob().Descriptor?.ToFido2()).ToList();
+                    .Where(credential => credential.Type == credType)
+                    .Select(c => c.GetFido2Blob().Descriptor).ToList();
 
             // 3. Create options
             var authenticatorSelection = new AuthenticatorSelection
             {
-                RequireResidentKey = false,
-                UserVerification = UserVerificationRequirement.Preferred
+                UserVerification = credType is Fido2Credential.CredentialType.Passkey
+                    ? UserVerificationRequirement.Required
+                    : UserVerificationRequirement.Discouraged,
+                ResidentKey = credType is Fido2Credential.CredentialType.Passkey ? ResidentKeyRequirement.Required : ResidentKeyRequirement.Discouraged
             };
 
             var exts = new AuthenticationExtensionsClientInputs()
             {
                 Extensions = true,
-                UserVerificationMethod = true
+                UserVerificationMethod = credType is Fido2Credential.CredentialType.Passkey,
             };
 
-            var options = _fido2.RequestNewCredential(
-                new Fido2User() { DisplayName = user.UserName, Name = user.UserName, Id = user.Id.ToBytesUTF8() },
-                existingKeys, authenticatorSelection, AttestationConveyancePreference.None, exts);
-
+            var options = _fido2.RequestNewCredential(new()
+            {
+                User = new Fido2User() { DisplayName = user.UserName, Name = user.UserName, Id = user.Id.ToBytesUTF8() },
+                ExcludeCredentials = existingKeys,
+                AuthenticatorSelection = authenticatorSelection,
+                AttestationPreference = AttestationConveyancePreference.None,
+                Extensions = exts
+            });
             // options.Rp = new PublicKeyCredentialRpEntity(Request.Host.Host, options.Rp.Name, "");
-            CreationStore.AddOrReplace(userId, options);
             return options;
         }
 
-        public async Task<bool> CompleteCreation(string userId, string name, string data)
+        public async Task CompleteCreation(string userId, string name, string data, CredentialCreateOptions options, Fido2Credential.CredentialType credType)
         {
-            try
-            {
+            var attestationResponse = System.Text.Json.JsonSerializer.Deserialize<AuthenticatorAttestationRawResponse>(data)!;
+            await using var dbContext = _contextFactory.CreateContext();
+            var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
+                .FirstOrDefaultAsync(applicationUser => applicationUser.Id == userId);
+            if (user == null)
+                throw new InvalidOperationException("Unknown user");
 
-                var attestationResponse = System.Text.Json.JsonSerializer.Deserialize<AuthenticatorAttestationRawResponse>(data);
-                await using var dbContext = _contextFactory.CreateContext();
-                var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
-                    .FirstOrDefaultAsync(applicationUser => applicationUser.Id == userId);
-                if (user == null || !CreationStore.TryGetValue(userId, out var options))
+            // 2. Verify and make the credentials
+            var success =
+                await _fido2.MakeNewCredentialAsync(new()
                 {
-                    return false;
-                }
-
-                // 2. Verify and make the credentials
-                var success =
-                    await _fido2.MakeNewCredentialAsync(attestationResponse, options, (args, cancellation) => Task.FromResult(true));
-
-                // 3. Store the credentials in db
-                var newCredential = new Fido2Credential() { Name = name, ApplicationUserId = userId };
-
-                newCredential.SetBlob(new Fido2CredentialBlob()
-                {
-                    Descriptor = new DescriptorClass(success.Result.CredentialId),
-                    PublicKey = success.Result.PublicKey,
-                    UserHandle = success.Result.User.Id,
-                    SignatureCounter = success.Result.Counter,
-                    CredType = success.Result.CredType,
-                    AaGuid = success.Result.Aaguid.ToString(),
+                    AttestationResponse = attestationResponse,
+                    OriginalOptions = options,
+                    IsCredentialIdUniqueToUserCallback = (_, _) => Task.FromResult(
+                        user.Fido2Credentials.Where(f => f.Type == credType)
+                            .All(f => !f.GetFido2Blob().Descriptor.Id.SequenceEqual(attestationResponse.RawId)))
                 });
 
-                await dbContext.Fido2Credentials.AddAsync(newCredential);
-                await dbContext.SaveChangesAsync();
-                CreationStore.Remove(userId, out _);
-                return true;
+            // 3. Store the credentials in db
+            var newCredential = new Fido2Credential() { Name = name, ApplicationUserId = userId, Type = credType };
 
-
-            }
-            catch (Exception)
+            newCredential.SetBlob(new Fido2CredentialBlob()
             {
-                return false;
-            }
+                Descriptor = new PublicKeyCredentialDescriptor(success.Id),
+                PublicKey = success.PublicKey,
+                UserHandle = success.User.Id,
+                SignatureCounter = success.SignCount,
+                AaGuid = success.AaGuid.ToString(),
+            });
+
+            await dbContext.Fido2Credentials.AddAsync(newCredential);
+            await dbContext.SaveChangesAsync();
         }
 
         public async Task<List<Fido2Credential>> GetCredentials(string userId)
@@ -135,25 +127,22 @@ namespace BTCPayServer.Fido2
             await context.SaveChangesAsync();
         }
 
-        public async Task<bool> HasCredentials(string userId)
+        public async Task<AssertionOptions?> RequestLogin(string? userId)
         {
-            await using var context = _contextFactory.CreateContext();
-            return await context.Fido2Credentials.Where(fDevice => fDevice.ApplicationUserId == userId && fDevice.Type == Fido2Credential.CredentialType.FIDO2).AnyAsync();
-        }
-
-        public async Task<AssertionOptions> RequestLogin(string userId)
-        {
-            await using var dbContext = _contextFactory.CreateContext();
-            var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
-                .FirstOrDefaultAsync(applicationUser => applicationUser.Id == userId);
-            if (!(user?.Fido2Credentials?.Any() is true))
+            List<PublicKeyCredentialDescriptor> existingCredentials = new();
+            if (userId is not null)
             {
-                return null;
+                await using var dbContext = _contextFactory.CreateContext();
+                var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
+                    .FirstOrDefaultAsync(applicationUser => applicationUser.Id == userId);
+                if (user is not null)
+                    existingCredentials.AddRange(user.Fido2Credentials
+                        .Where(credential => credential.Type == Fido2Credential.CredentialType.FIDO2)
+                        .Select(c => c.GetFido2Blob().Descriptor));
+                if (existingCredentials.Count == 0)
+                    return null;
             }
-            var existingCredentials = user.Fido2Credentials
-                .Where(credential => credential.Type == Fido2Credential.CredentialType.FIDO2)
-                .Select(c => c.GetFido2Blob().Descriptor?.ToFido2())
-                .ToList();
+
             var exts = new AuthenticationExtensionsClientInputs()
             {
                 UserVerificationMethod = true,
@@ -163,45 +152,87 @@ namespace BTCPayServer.Fido2
 
             // 3. Create options
             var options = _fido2.GetAssertionOptions(
-                existingCredentials,
-                UserVerificationRequirement.Discouraged,
-                exts
+                new()
+                {
+                    AllowedCredentials = existingCredentials,
+                    UserVerification = userId is null ? UserVerificationRequirement.Required : UserVerificationRequirement.Discouraged,
+                    Extensions = exts
+                }
             );
-            LoginStore.AddOrReplace(userId, options);
             return options;
         }
 
-        public async Task<bool> CompleteLogin(string userId, AuthenticatorAssertionRawResponse response)
+        public record LoginResult
         {
+            public record Failed(string Reason) : LoginResult;
+
+            public record Success(ApplicationUser User) : LoginResult;
+        }
+
+        public async Task<LoginResult> CompleteLogin(string? userId, string responseJson, AssertionOptions options, bool passKey)
+        {
+            AuthenticatorAssertionRawResponse? response = null;
+            try
+            {
+                response = System.Text.Json.JsonSerializer.Deserialize<AuthenticatorAssertionRawResponse>(responseJson);
+            }
+            catch { }
+
+            if (response?.Response is null)
+                return new LoginResult.Failed("Invalid assertion");
+
+            if (userId is null && response.Response.UserHandle is { } handle)
+                userId = UTF8Encoding.UTF8.GetString(handle);
+
+            if (userId is null)
+                return new LoginResult.Failed("User Id not provided");
             await using var dbContext = _contextFactory.CreateContext();
-            var user = await dbContext.Users.Include(applicationUser => applicationUser.Fido2Credentials)
+            var user = await dbContext.Users.AsNoTracking()
+                .Include(applicationUser => applicationUser.Fido2Credentials)
                 .FirstOrDefaultAsync(applicationUser => applicationUser.Id == userId);
-            if (user == null || !LoginStore.TryGetValue(userId, out var options))
-            {
-                return false;
-            }
-
+            if (user == null)
+                return new LoginResult.Failed("Unknown user");
+            var credType = passKey ? Fido2Credential.CredentialType.Passkey : Fido2Credential.CredentialType.FIDO2;
             var credential = user.Fido2Credentials
-                .Where(fido2Credential => fido2Credential.Type is Fido2Credential.CredentialType.FIDO2)
+                .Where(fido2Credential => fido2Credential.Type == credType)
                 .Select(fido2Credential => (fido2Credential, fido2Credential.GetFido2Blob()))
-                .FirstOrDefault(fido2Credential => fido2Credential.Item2.Descriptor.Id.SequenceEqual(response.Id));
+                .FirstOrDefault(fido2Credential => fido2Credential.Item2.Descriptor.Id.SequenceEqual(response.RawId));
             if (credential.Item2 is null)
+                return new LoginResult.Failed("Unknown credential");
+
+            try
             {
-                return false;
+                // 5. Make the assertion
+                var res = await _fido2.MakeAssertionAsync(new()
+                {
+                    AssertionResponse = response,
+                    OriginalOptions = options,
+                    StoredPublicKey = credential.Item2.PublicKey,
+                    StoredSignatureCounter = credential.Item2.SignatureCounter,
+                    IsUserHandleOwnerOfCredentialIdCallback = (a, _) =>
+                        Task.FromResult(credential.Item1.ApplicationUserId == UTF8Encoding.UTF8.GetString(a.UserHandle))
+                });
+
+                // 6. Store the updated counter
+                await dbContext.Fido2Credentials.GetDbConnection().ExecuteAsync("""
+                                                                                UPDATE "Fido2Credentials"
+                                                                                SET "Blob2" = jsonb_set(COALESCE("Blob2", '{}'::jsonb), '{signatureCounter}', to_jsonb(@signatureCounter)),
+                                                                                "LastUsedAt" = @now
+                                                                                WHERE "Id" = @id
+                                                                                """, new
+                {
+                    id = credential.fido2Credential.Id,
+                    signatureCounter = (long)res.SignCount,
+                    now = DateTimeOffset.UtcNow
+                });
             }
-
-            // 5. Make the assertion
-            var res = await _fido2.MakeAssertionAsync(response, options, credential.Item2.PublicKey,
-                credential.Item2.SignatureCounter, (x, cancellationToken) => Task.FromResult(true));
-
-            // 6. Store the updated counter
-            credential.Item2.SignatureCounter = res.Counter;
-            credential.fido2Credential.SetBlob(credential.Item2);
-            await dbContext.SaveChangesAsync();
-            LoginStore.Remove(userId, out _);
+            catch (Fido2VerificationException ex)
+            {
+                return new LoginResult.Failed("Invalid assertion: " + ex.Message);
+            }
 
             // 7. return OK to client
-            return true;
+            return new LoginResult.Success(user);
         }
     }
 }

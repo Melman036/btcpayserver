@@ -10,6 +10,9 @@ namespace BTCPayServer.Models.ManageViewModels
         [MaxLength(50)]
         [Display(Name = "Email")]
         public string Email { get; set; }
+        [DataType(DataType.Password)]
+        [Display(Name = "Current password")]
+        public string CurrentPassword { get; set; }
         public bool EmailConfirmed { get; set; }
         public bool RequiresEmailConfirmation { get; set; }
         [Display(Name = "Name")]
@@ -18,5 +21,8 @@ namespace BTCPayServer.Models.ManageViewModels
         [Display(Name = "Profile Picture")]
         public IFormFile ImageFile { get; set; }
         public string ImageUrl { get; set; }
+
+        [Display(Name = "Allow Basic authentication for Greenfield API")]
+        public bool AllowGreenfieldBasicAuth { get; set; }
     }
 }

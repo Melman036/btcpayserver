@@ -1,7 +1,6 @@
 using BTCPayServer.Hosting;
 using BTCPayServer.Payments;
 using BTCPayServer.Services;
-using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
 using NBitcoin;
 
@@ -20,7 +19,7 @@ public partial class AltcoinsPlugin
             DefaultRateRules = new[]
                 {
                         "DASH_X = DASH_BTC * BTC_X",
-                        "DASH_BTC = bitfinex(DSH_BTC)"
+                        "DASH_BTC = kraken(DASH_USD) * kraken(USD_BTC)"
                     },
             CryptoImagePath = "imlegacy/dash.png",
             DefaultSettings = BTCPayDefaultSettings.GetDefaultSettings(ChainName),

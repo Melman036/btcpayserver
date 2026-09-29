@@ -18,17 +18,8 @@ namespace BTCPayServer.Controllers.Greenfield
     [ApiController]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.GreenfieldAPIKeys)]
     [EnableCors(CorsPolicies.All)]
-    public class GreenfieldApiKeysController : ControllerBase
+    public class GreenfieldApiKeysController(APIKeyRepository apiKeyRepository, UserManager<ApplicationUser> userManager) : ControllerBase
     {
-        private readonly APIKeyRepository _apiKeyRepository;
-        private readonly UserManager<ApplicationUser> _userManager;
-
-        public GreenfieldApiKeysController(APIKeyRepository apiKeyRepository, UserManager<ApplicationUser> userManager)
-        {
-            _apiKeyRepository = apiKeyRepository;
-            _userManager = userManager;
-        }
-
         [HttpGet("~/api/v1/api-keys/current")]
         public async Task<IActionResult> GetKey()
         {
@@ -37,39 +28,35 @@ namespace BTCPayServer.Controllers.Greenfield
                 return
                     this.CreateAPIError(404, "api-key-not-found", "The api key was not present.");
             }
-            var data = await _apiKeyRepository.GetKey(apiKey);
+            var data = await apiKeyRepository.GetKey(new APIKeyRepository.Selector.ByApiKey(apiKey));
+            data.Key = apiKey;
             return Ok(FromModel(data));
         }
 
         [HttpPost("~/api/v1/api-keys")]
-        [Authorize(Policy = Policies.Unrestricted, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+        [Authorize(Policy = Policies.UnrestrictedUnscoped, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
         public Task<IActionResult> CreateAPIKey(CreateApiKeyRequest request)
-        {
-            return CreateUserAPIKey(_userManager.GetUserId(User), request);
-        }
+        => CreateUserAPIKey(User.GetId(), request);
 
         [HttpPost("~/api/v1/users/{idOrEmail}/api-keys")]
-        [Authorize(Policy = Policies.CanManageUsers, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+        [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
         public async Task<IActionResult> CreateUserAPIKey(string idOrEmail, CreateApiKeyRequest request)
         {
             request ??= new CreateApiKeyRequest();
             request.Permissions ??= System.Array.Empty<Permission>();
 
-            var userId = (await _userManager.FindByIdOrEmail(idOrEmail))?.Id;
+            var userId = (await userManager.FindByIdOrEmail(idOrEmail))?.Id;
             if (userId is null)
                 return this.UserNotFound();
-            var key = new APIKeyData()
-            {
-                Id = Encoders.Hex.EncodeData(RandomUtils.GetBytes(20)),
-                Type = APIKeyType.Permanent,
-                UserId = userId,
-                Label = request.Label
-            };
+
+            var key = APIKeyRepository.New();
+            key.UserId = userId;
+            key.Label = request.Label;
             key.SetBlob(new APIKeyBlob()
             {
                 Permissions = request.Permissions.Select(p => p.ToString()).Distinct().ToArray()
             });
-            await _apiKeyRepository.CreateKey(key);
+            await apiKeyRepository.CreateKey(key);
             return Ok(FromModel(key));
         }
 
@@ -82,24 +69,22 @@ namespace BTCPayServer.Controllers.Greenfield
                 // Should be impossible (we force apikey auth)
                 return Task.FromResult<IActionResult>(BadRequest());
             }
-            return RevokeAPIKey(apiKey);
+            return RevokeAPIKey(new APIKeyRepository.Selector.ByApiKey(apiKey).GetId());
         }
-        [HttpDelete("~/api/v1/api-keys/{apikey}", Order = 1)]
+        [HttpDelete("~/api/v1/api-keys/{apiKeyId}", Order = 1)]
         [Authorize(Policy = Policies.Unrestricted, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-        public Task<IActionResult> RevokeAPIKey(string apikey)
-        {
-            return RevokeAPIKey(_userManager.GetUserId(User), apikey);
-        }
+        public Task<IActionResult> RevokeAPIKey(string apiKeyId)
+        => RevokeAPIKey(User.GetId(), apiKeyId);
 
-        [HttpDelete("~/api/v1/users/{idOrEmail}/api-keys/{apikey}", Order = 1)]
+        [HttpDelete("~/api/v1/users/{idOrEmail}/api-keys/{apiKeyId}", Order = 1)]
         [Authorize(Policy = Policies.CanManageUsers, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-        public async Task<IActionResult> RevokeAPIKey(string idOrEmail, string apikey)
+        public async Task<IActionResult> RevokeAPIKey(string idOrEmail, string apiKeyId)
         {
-            var userId = (await _userManager.FindByIdOrEmail(idOrEmail))?.Id;
+            var userId = (await userManager.FindByIdOrEmail(idOrEmail))?.Id;
             if (userId is null)
                 return this.UserNotFound();
-            if (!string.IsNullOrEmpty(apikey) &&
-                await _apiKeyRepository.Remove(apikey, userId))
+            if (!string.IsNullOrEmpty(apiKeyId) &&
+                await apiKeyRepository.Remove(new APIKeyRepository.Selector.ById(apiKeyId), userId))
                 return Ok();
             else
                 return this.CreateAPIError("apikey-not-found", "This apikey does not exists");
@@ -107,13 +92,13 @@ namespace BTCPayServer.Controllers.Greenfield
 
 
         private static ApiKeyData FromModel(APIKeyData data)
+        => new ApiKeyData()
         {
-            return new ApiKeyData()
-            {
-                Permissions = Permission.ToPermissions(data.GetBlob().Permissions).ToArray(),
-                ApiKey = data.Id,
-                Label = data.Label ?? string.Empty
-            };
-        }
+            Id = data.Id,
+            Permissions = Permission.ToPermissions(data.GetBlob().Permissions).ToArray(),
+            ApiKey = data.Key,
+            Label = data.Label ?? string.Empty,
+            Created = data.CreatedAt
+        };
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Security;
 using System.Text;
@@ -11,24 +12,24 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
+using BTCPayServer.Controllers;
 using BTCPayServer.Client;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Configuration;
-using BTCPayServer.Controllers;
 using BTCPayServer.Data;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Hosting;
 using BTCPayServer.JsonConverters;
 using BTCPayServer.Payments;
-using BTCPayServer.Plugins.Emails.Views;
+using BTCPayServer.Plugins.Wallets.Views.ViewModels;
 using BTCPayServer.Rating;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Apps;
 using BTCPayServer.Services.Fees;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
-using BTCPayServer.Services.Stores;
 using BTCPayServer.Services.Wallets;
+using BTCPayServer.Services.Wallets.Import;
 using BTCPayServer.Validation;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Configuration.Memory;
@@ -37,14 +38,12 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NBitcoin;
 using NBitcoin.RPC;
-using NBitcoin.Scripting.Parser;
 using NBitcoin.WalletPolicies;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace BTCPayServer.Tests
 {
@@ -54,6 +53,28 @@ namespace BTCPayServer.Tests
         public FastTests(ITestOutputHelper helper) : base(helper)
         {
         }
+
+        [Fact]
+        public void BTCPayServerClientEscapesPathIdentifiers()
+        {
+            var client = new RequestInspectingClient(new Uri("https://example.com/root/"));
+            var request = client.CreateRequest($"api/v1/stores/{"../users/me"}/webhooks/{"delivery/../x"}?email={"a+b@example.com"}");
+
+            Assert.Equal("https://example.com/root/api/v1/stores/..%2Fusers%2Fme/webhooks/delivery%2F..%2Fx?email=a%2Bb%40example.com", request.RequestUri!.AbsoluteUri);
+        }
+
+        private class RequestInspectingClient : BTCPayServerClient
+        {
+            public RequestInspectingClient(Uri btcpayHost) : base(btcpayHost)
+            {
+            }
+
+            public HttpRequestMessage CreateRequest(FormattableString path)
+            {
+                return CreateHttpRequest(path);
+            }
+        }
+
         class DockerImage
         {
             public string User { get; private set; }
@@ -229,6 +250,39 @@ namespace BTCPayServer.Tests
         }
 
         [Fact]
+        public async Task CanParseBip329LabelsImport()
+        {
+            var network = Network.RegTest;
+            var txId = "aecb52b892f5e12454b3ee1ad554ffe28c1cca35ffdfaa441c74a30cf7a279f0";
+            var address = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, network).ToString();
+            var mainnetAddress = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.Main).ToString();
+            var input =
+                $"{{\"type\":\"tx\",\"ref\":\"{txId.ToUpperInvariant()}\",\"label\":\" fee reimbursement \"}}\n" +
+                $"{{\"type\":\"addr\",\"ref\":\"{address}\",\"label\":\"donations\"}}\n" +
+                $"{{\"type\":\"output\",\"ref\":\"{txId}:1\",\"label\":\"change\"}}\n" +
+                "\n" +
+                $"{{\"type\":\"tx\",\"ref\":\"{txId.ToUpperInvariant()}\",\"label\":\" fee reimbursement \"}}\n" +
+                $"{{\"type\":\"addr\",\"ref\":\"{mainnetAddress}\",\"label\":\"wrong network\"}}\n" +
+                $"{{\"type\":\"xpub\",\"ref\":\"xpub-ref\",\"label\":\"unsupported type\"}}\n" +
+                $"{{\"type\":\"tx\",\"ref\":\"not-a-txid\",\"label\":\"bad ref\"}}\n" +
+                $"{{\"type\":\"tx\",\"ref\":\"{txId}\",\"label\":\"\"}}\n" +
+                $"{{\"type\":\"tx\",\"ref\":\"{txId}\"}}\n" +
+                $"{{\"type\":\"tx\",\"ref\":\"{txId}\",\"label\":{{}}}}\n" +
+                $"{{\"type\":\"tx\",\"ref\":[1],\"label\":\"array ref\"}}\n" +
+                $"{{\"type\":5,\"ref\":\"{txId}\",\"label\":\"numeric type\"}}\n" +
+                "not json\n";
+
+            var result = await Bip329Import.Parse(new StringReader(input), network);
+
+            Assert.Equal(3, result.Labels.Count);
+            // duplicate line deduped, invalid lines skipped, blank line ignored
+            Assert.Equal(9, result.SkippedLines);
+            Assert.Contains(result.Labels, l => l is { ObjectType: WalletObjectData.Types.Tx, Label: "fee reimbursement" } && l.ObjectId == txId);
+            Assert.Contains(result.Labels, l => l is { ObjectType: WalletObjectData.Types.Address, Label: "donations" } && l.ObjectId == address);
+            Assert.Contains(result.Labels, l => l is { ObjectType: WalletObjectData.Types.Utxo, Label: "change" } && l.ObjectId == OutPoint.Parse($"{txId}-1").ToString());
+        }
+
+        [Fact]
         public void CanParsePaymentMethodId()
         {
             var id = PaymentMethodId.Parse("BTC");
@@ -251,6 +305,21 @@ namespace BTCPayServer.Tests
             id1 = PaymentMethodId.Parse("XMR-MoneroLike");
             Assert.Equal(id, id1);
             Assert.Equal("XMR-CHAIN", id.ToString());
+        }
+
+        [Fact]
+        public void PaymentMethodIdHashCodeIsCaseInsensitive()
+        {
+            var uppercase = new PaymentMethodId("CUSTOM-PAYMENT");
+            var lowercase = new PaymentMethodId("custom-payment");
+            var paymentMethods = new Dictionary<PaymentMethodId, string>
+            {
+                [uppercase] = "handler"
+            };
+
+            Assert.Equal(uppercase, lowercase);
+            Assert.Equal(uppercase.GetHashCode(), lowercase.GetHashCode());
+            Assert.Equal("handler", paymentMethods[lowercase]);
         }
 
         [Fact]
@@ -336,6 +405,10 @@ namespace BTCPayServer.Tests
             Assert.False(attribute.IsValid(2));
             Assert.False(attribute.IsValid("http://"));
             Assert.False(attribute.IsValid("httpdsadsa.com"));
+
+            var webUriAttribute = new UriAttribute("http", "https");
+            Assert.True(webUriAttribute.IsValid("https://example.com"));
+            Assert.False(webUriAttribute.IsValid("javascript:document.body.dataset.pwned=1"));
         }
 
         [Fact]
@@ -1431,45 +1504,20 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
         }
 
         [Fact]
-        public void CanUsePermission()
-        {
-            Assert.True(Permission.Create(Policies.CanModifyServerSettings)
-                .Contains(Permission.Create(Policies.CanModifyServerSettings)));
-            Assert.True(Permission.Create(Policies.CanModifyProfile)
-                .Contains(Permission.Create(Policies.CanViewProfile)));
-            Assert.True(Permission.Create(Policies.CanModifyStoreSettings)
-                .Contains(Permission.Create(Policies.CanViewStoreSettings)));
-            Assert.False(Permission.Create(Policies.CanViewStoreSettings)
-                .Contains(Permission.Create(Policies.CanModifyStoreSettings)));
-            Assert.False(Permission.Create(Policies.CanModifyServerSettings)
-                .Contains(Permission.Create(Policies.CanModifyStoreSettings)));
-            Assert.True(Permission.Create(Policies.Unrestricted)
-                .Contains(Permission.Create(Policies.CanModifyStoreSettings)));
-            Assert.True(Permission.Create(Policies.Unrestricted)
-                .Contains(Permission.Create(Policies.CanModifyStoreSettings, "abc")));
-
-            Assert.True(Permission.Create(Policies.CanViewStoreSettings)
-                .Contains(Permission.Create(Policies.CanViewStoreSettings, "abcd")));
-            Assert.False(Permission.Create(Policies.CanModifyStoreSettings, "abcd")
-                .Contains(Permission.Create(Policies.CanModifyStoreSettings)));
-        }
-
-        [Fact]
         public void CanParseFilter()
         {
+            var utc = TimeZoneInfo.Utc;
             var storeId = "6DehZnc9S7qC6TUTNWuzJ1pFsHTHvES6An21r3MjvLey";
             var filter = "storeid:abc, status:abed, blabhbalh ";
             var search = new SearchString(filter);
-            Assert.Equal("storeid:abc, status:abed, blabhbalh", search.ToString());
+            Assert.Equal("storeid:abc,status:abed,blabhbalh", search.ToString());
             Assert.Equal("blabhbalh", search.TextSearch);
             Assert.Single(search.Filters["storeid"], "abc");
             Assert.Single(search.Filters["status"], "abed");
 
             filter = "status:abed, status:abed2";
             search = new SearchString(filter);
-            Assert.Null(search.TextSearch);
-            Assert.Null(search.TextFilters);
-            Assert.Equal("status:abed, status:abed2", search.ToString());
+            Assert.Equal("status:abed,status:abed2", search.ToString());
             Assert.Throws<KeyNotFoundException>(() => search.Filters["test"]);
             Assert.Equal(2, search.Filters["status"].Count);
             Assert.Equal("abed", search.Filters["status"].First());
@@ -1479,13 +1527,23 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             search = new SearchString(filter);
             Assert.Equal("2019-04-25 01:00 AM", search.Filters["startdate"].First());
             Assert.Equal("hekki", search.TextSearch);
-            Assert.Equal("orderid:MYORDERID,orderid:MYORDERID_2", search.TextFilters);
-            Assert.Equal("orderid:MYORDERID,orderid:MYORDERID_2,hekki", search.TextCombined);
-            Assert.Equal("StartDate:2019-04-25 01:00 AM", search.WithoutSearchText());
-            Assert.Equal(filter, search.ToString());
+            Assert.Equal("orderid:MYORDERID,orderid:MYORDERID_2,hekki", search.ToString(SearchStringFormat.ExceptUIFilters));
+            Assert.Equal("startdate:2019-04-25 01:00 AM", search.ToString(SearchStringFormat.OnlyUIFilters));
+            Assert.Equal("startdate:2019-04-25 01:00 AM,orderid:MYORDERID,orderid:MYORDERID_2,hekki", search.ToString());
+
+            filter = "label:test,nolabel:true,direction:in, hekki";
+            search = new SearchString(filter);
+            search.UIFilterTypes.Add("label");
+            search.UIFilterTypes.Add("nolabel");
+            search.UIFilterTypes.Add("direction");
+            Assert.Equal("hekki", search.TextSearch);
+            Assert.Equal("hekki", search.ToString(SearchStringFormat.ExceptUIFilters));
+            Assert.Single(search.Filters["label"], "test");
+            Assert.Single(search.Filters["direction"], "in");
+            Assert.True(search.GetFilterBool("nolabel"));
 
             // modify search
-            filter = $"status:settled,exceptionstatus:paidLate,unusual:true, fulltext searchterm, storeid:{storeId},startdate:2019-04-25 01:00:00";
+            filter = $"status:settled,exceptionstatus:paidLate,unusual:true,storeid:{storeId},startdate:2019-04-25 01:00:00,fulltext searchterm";
             search = new SearchString(filter);
             Assert.Equal(filter, search.ToString());
             Assert.Equal("fulltext searchterm", search.TextSearch);
@@ -1495,52 +1553,167 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             Assert.Single(search.Filters["unusual"], "true");
 
             // toggle off bool with same value
-            var modified = new SearchString(search.Toggle("unusual", "true"));
-            Assert.Null(modified.GetFilterBool("unusual"));
+            search.SetFilter("unusual", "true", true);
+            Assert.Null(search.GetFilterBool("unusual"));
 
             // add to array
-            modified = new SearchString(modified.Toggle("status", "processing"));
-            var statusArray = modified.GetFilterArray("status");
+            search.SetFilter("status", "processing", toggle: true, multi: true);
+            var statusArray = search.GetFilterArray("status");
             Assert.Equal(2, statusArray.Length);
-            Assert.Contains("processing", statusArray);
             Assert.Contains("settled", statusArray);
+            Assert.Contains("processing", statusArray);
+            search.SetFilter("status", "processing");
+            statusArray = search.GetFilterArray("status");
+            Assert.Single(statusArray);
+            Assert.Contains("processing", statusArray);
+            search.SetFilter("status", "settled", toggle: true, multi: false);
+            statusArray = search.GetFilterArray("status");
+            Assert.Single(statusArray);
+            Assert.Contains("settled", statusArray);
+            search.SetFilter("status", "processing", multi: true);
+            statusArray = search.GetFilterArray("status");
+            Assert.Equal(2, statusArray.Length);
 
             // toggle off array with same value
-            modified = new SearchString(modified.Toggle("status", "settled"));
-            statusArray = modified.GetFilterArray("status");
+            search.SetFilter("status", "settled", true, true);
+            statusArray = search.GetFilterArray("status");
             Assert.Single(statusArray, "processing");
 
             // toggle off array with null value
-            modified = new SearchString(modified.Toggle("status", null));
-            Assert.Null(modified.GetFilterArray("status"));
+            search.SetFilter("status", null);
+            Assert.Null(search.GetFilterArray("status"));
 
             // toggle off date with null value
-            modified = new SearchString(modified.Toggle("startdate", "-7d"));
-            Assert.Single(modified.GetFilterArray("startdate"), "-7d");
-            modified = new SearchString(modified.Toggle("startdate", null));
-            Assert.Null(modified.GetFilterArray("startdate"));
+            search.SetFilter("startdate", "last30d");
+            Assert.Single(search.GetFilterArray("startdate"), "last30d");
+            search.SetFilter("startdate", null);
+            Assert.Null(search.GetFilterArray("startdate"));
 
             // toggle off date with same value
-            modified = new SearchString(modified.Toggle("enddate", "-7d"));
-            Assert.Single(modified.GetFilterArray("enddate"), "-7d");
-            modified = new SearchString(modified.Toggle("enddate", "-7d"));
-            Assert.Null(modified.GetFilterArray("enddate"));
+            search.SetFilter("enddate", "lastmonth");
+            Assert.Single(search.GetFilterArray("enddate"), "lastmonth");
+            search.SetFilter("enddate", "lastmonth", true);
+            Assert.Null(search.GetFilterArray("enddate"));
+
+            search = new SearchString("7,daterange:thismonth");
+            Assert.Equal("daterange:thismonth", search.ToString(SearchStringFormat.OnlyUIFilters));
+
+            var now = DateTime.UtcNow;
+            var dateRange = search.GetDateRange(utc);
+            Assert.Equal(new DateTimeOffset(now.Year, now.Month, 1, 0, 0, 0, TimeSpan.Zero), dateRange.StartDate);
+            Assert.InRange(dateRange.EndDate!.Value, new DateTimeOffset(now, TimeSpan.Zero), DateTimeOffset.UtcNow);
+
+            var nowUTC = DateTimeOffset.UtcNow;
+            var nowLocal = nowUTC.ToLocalTime();
+            var tokyo = TimeZoneInfo.FindSystemTimeZoneById("Asia/Tokyo");
+            var nowTokyo = DateTimeOffset.UtcNow + tokyo.GetUtcOffset(nowUTC);
+            var s1 = new SearchString($"startdate:{nowUTC:O}");
+            var s2 = new SearchString($"startdate:{nowLocal:O}");
+            var s3 = new SearchString($"startdate:{nowUTC}");
+            var s4 = new SearchString($"startdate:{Regex.Replace(nowTokyo.ToString(), @"\+.*", "")},timezone={tokyo.Id}");
+            var s5 = new SearchString($"startdate:{nowUTC:u}");
+
+            void AssertEqual(SearchString a, SearchString b)
+            {
+                var d1 = a.GetFilterDate("startdate", utc)!.Value;
+                var d2 = b.GetFilterDate("startdate", utc)!.Value;
+                Assert.True((d1 - d2).TotalSeconds < 2);
+            }
+
+            AssertEqual(s1, s2);
+            AssertEqual(s1, s3);
+            AssertEqual(s1, s4);
+            AssertEqual(s1, s5);
         }
 
         [Fact]
-        public void CanParseFingerprint()
+        public void CanParseFilterDateWithTimeZone()
         {
-            Assert.True(SSH.SSHFingerprint.TryParse("4e343c6fc6cfbf9339c02d06a151e1dd", out var unused));
-            Assert.Equal("4e:34:3c:6f:c6:cf:bf:93:39:c0:2d:06:a1:51:e1:dd", unused.ToString());
-            Assert.True(SSH.SSHFingerprint.TryParse("4e:34:3c:6f:c6:cf:bf:93:39:c0:2d:06:a1:51:e1:dd", out unused));
-            Assert.True(SSH.SSHFingerprint.TryParse("SHA256:Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w", out unused));
-            Assert.True(SSH.SSHFingerprint.TryParse("SHA256:Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w=", out unused));
-            Assert.True(SSH.SSHFingerprint.TryParse("Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w=", out unused));
-            Assert.Equal("SHA256:Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w", unused.ToString());
+            var utc = TimeZoneInfo.Utc;
+            var search = new SearchString("startdate:2026-01-15 10:00:00");
 
-            Assert.True(SSH.SSHFingerprint.TryParse("Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w=", out var f1));
-            Assert.True(SSH.SSHFingerprint.TryParse("SHA256:Wl7CdRgT4u5T7yPMsxSrlFP+HIJJWwidGkzphJ8di5w", out var f2));
-            Assert.Equal(f1.ToString(), f2.ToString());
+            void AssertEqual(DateTimeOffset a, DateTimeOffset? b)
+            {
+                Assert.NotNull(b);
+                Assert.Equal(a, b);
+                Assert.Equal(a.Offset, b.Value.Offset);
+            }
+
+            AssertEqual(
+                new DateTimeOffset(2026, 1, 15, 10, 0, 0, TimeSpan.Zero),
+                search.GetFilterDate("startdate", utc));
+
+            var paris = TimeZoneInfo.FindSystemTimeZoneById("Europe/Paris");
+            search = new SearchString("startdate:2026-01-15 10:00:00");
+            AssertEqual(
+                new DateTimeOffset(2026, 1, 15, 9, 0, 0, TimeSpan.Zero),
+                search.GetFilterDate("startdate", paris));
+
+            var tokyo = TimeZoneInfo.FindSystemTimeZoneById("Asia/Tokyo");
+            search = new SearchString("startdate:2026-06-30 17:00:00");
+            AssertEqual(
+                new DateTimeOffset(2026, 6, 30, 8, 0, 0, TimeSpan.Zero),
+                search.GetFilterDate("startdate", tokyo));
+        }
+
+        [Fact]
+        public void BuildWalletTransactionsFilterSeparatesTextAndStructuredTerms()
+        {
+            var result = BuildWalletTransactionsFilter(
+                "direction:out,label:primary-label,nolabel:true,startdate:2026-03-01T12:34:56",
+                "abc123tx");
+
+            Assert.Equal("abc123tx", result.SearchText);
+            Assert.Equal("abc123tx", result.TextSearch);
+
+            var structuredSearchTerm = result.SearchTerm;
+            Assert.Contains("direction:out", structuredSearchTerm);
+            Assert.Contains("label:primary-label", structuredSearchTerm);
+            Assert.Contains("nolabel:true", structuredSearchTerm);
+            Assert.Contains("startdate:2026-03-01T12:34:56", structuredSearchTerm);
+            Assert.DoesNotContain("abc123tx", structuredSearchTerm);
+
+            Assert.Equal(["primary-label"], result.LabelFilters);
+            Assert.True(result.IncludeNoLabel);
+            Assert.False(result.Positive);
+            Assert.NotNull(result.StartDate);
+            Assert.True(result.HasLabelFilter);
+            Assert.True(result.HasFilters);
+
+            result = BuildWalletTransactionsFilter(null, "abc");
+
+            Assert.Equal(string.Empty, result.SearchTerm);
+            Assert.Equal("abc", result.SearchText);
+            Assert.Equal("abc", result.TextSearch);
+            Assert.False(result.HasLabelFilter);
+            Assert.True(result.HasFilters);
+
+            result = BuildWalletTransactionsFilter("foo:bar", null);
+
+            Assert.Equal(string.Empty, result.SearchTerm);
+            Assert.Equal(string.Empty, result.SearchText);
+            Assert.Equal(string.Empty, result.TextSearch);
+            Assert.False(result.HasLabelFilter);
+            Assert.False(result.HasFilters);
+
+            result = BuildWalletTransactionsFilter(string.Empty, null);
+
+            Assert.Equal(string.Empty, result.SearchTerm);
+            Assert.Equal(string.Empty, result.SearchText);
+            Assert.Equal(string.Empty, result.TextSearch);
+            Assert.False(result.HasLabelFilter);
+            Assert.False(result.HasFilters);
+        }
+
+        internal static UIWalletsController.WalletTransactionsFilter BuildWalletTransactionsFilter(string searchText, string searchTerm)
+        {
+            var list = new ListTransactionsViewModel()
+            {
+                SearchText = searchText,
+                SearchTerm = searchTerm,
+            };
+            var search = list.GetSearch();
+            return UIWalletsController.BuildWalletTransactionsFilter(search);
         }
 
         [Fact]
@@ -1895,7 +2068,7 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             {
                 Assert.Equal(test.Expected, rules.GetRuleFor(CurrencyPair.Parse(test.Pair)).ToString());
             }
-            rules.Spread = 0.2m;
+            rules = rules.ChangeSpread(0.2m);
             Assert.Equal("(bitpay(DOGE_BTC) * kraken(BTC_USD) * 1.1) * (0.8, 1.2)", rules.GetRuleFor(CurrencyPair.Parse("DOGE_USD")).ToString());
             ////////////////
 
@@ -1964,7 +2137,7 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             builder.AppendLine("BTC_USD = -3 + coinbase(BTC_CAD) + 50 - 5");
             builder.AppendLine("DOGE_BTC = 2000");
             Assert.True(RateRules.TryParse(builder.ToString(), out rules));
-            rules.Spread = 0.1m;
+            rules = rules.ChangeSpread(0.1m);
 
             rule2 = rules.GetRuleFor(CurrencyPair.Parse("DOGE_USD"));
             Assert.Equal("(2000 * (-3 + coinbase(BTC_CAD) + 50 - 5)) * (0.9, 1.1)", rule2.ToString());
@@ -2218,9 +2391,8 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             //a master fingerprint must always be present if youre providing rooted path
             Assert.ThrowsAny<FormatException>(() => mainnetParser.ParseOD("pkh([44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/1/*)"));
 
-
             parsedDescriptor = mainnetParser.ParseOD(
-                "pkh(xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/0/*)");
+                "pkh([d34db33f]xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL/<0;1>/*)");
             Assert.Equal("xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL-[legacy]", parsedDescriptor.AccountDerivation.ToString());
 
             //but a different deriv path from standard (0/*) is not supported
@@ -2341,20 +2513,6 @@ bc1qfzu57kgu5jthl934f9xrdzzx8mmemx7gn07tf0grnvz504j6kzusu2v0ku
             // LTC might should be over paid due to BTC paying above what it should (round 1 satoshi up), but we handle this case
             // and set DueUncapped to zero.
             Assert.Equal(0.0m, accounting.DueUncapped);
-        }
-
-        [Fact]
-        public void AllPoliciesShowInUI()
-        {
-            new BitpayRateProvider(new System.Net.Http.HttpClient()).GetRatesAsync(default).GetAwaiter().GetResult();
-            foreach (var policy in Policies.AllPolicies)
-            {
-                Assert.True(UIManageController.AddApiKeyViewModel.PermissionValueItem.PermissionDescriptions.ContainsKey(policy));
-                if (Policies.IsStorePolicy(policy))
-                {
-                    Assert.True(UIManageController.AddApiKeyViewModel.PermissionValueItem.PermissionDescriptions.ContainsKey($"{policy}:"));
-                }
-            }
         }
 
         [Fact]

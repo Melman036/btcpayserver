@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  COMPOSE_PROJECT_NAME: btcpayservertests
+
+jobs:
+  fast_tests:
+    name: Fast Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run fast and third-party tests
+        run: bash .github/scripts/run-tests.sh "Fast=Fast|ThirdParty=ThirdParty"
+      - name: Collect artifacts
+        if: always()
+        run: bash .github/scripts/collect-artifacts.sh
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-tests-artifacts
+          path: /tmp/Artifacts
+          if-no-files-found: ignore
+      - name: Check Bitcoin-only build
+        run: bash .github/scripts/can-build.sh
+
+  playwright_tests:
+    name: Playwright Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run Playwright tests
+        run: bash .github/scripts/run-tests.sh "Playwright=Playwright"
+      - name: Collect artifacts
+        if: always()
+        run: bash .github/scripts/collect-artifacts.sh
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-tests-artifacts
+          path: /tmp/Artifacts
+          if-no-files-found: ignore
+
+  playwright_2_tests:
+    name: Playwright 2 Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run Playwright 2 tests
+        run: bash .github/scripts/run-tests.sh "Playwright=Playwright-2"
+      - name: Collect artifacts
+        if: always()
+        run: bash .github/scripts/collect-artifacts.sh
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-2-tests-artifacts
+          path: /tmp/Artifacts
+          if-no-files-found: ignore
+
+  integration_tests:
+    name: Integration Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run integration tests
+        run: bash .github/scripts/run-tests.sh "Integration=Integration"
+      - name: Collect artifacts
+        if: always()
+        run: bash .github/scripts/collect-artifacts.sh
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-tests-artifacts
+          path: /tmp/Artifacts
+          if-no-files-found: ignore

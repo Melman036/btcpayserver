@@ -1,5 +1,4 @@
 #nullable enable
-using System;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,8 +10,12 @@ public partial class BTCPayServerClient
 {
     public async Task<OfferingModel> CreateOffering(string storeId, OfferingModel offering, CancellationToken token = default)
     => await SendHttpRequest<OfferingModel>($"api/v1/stores/{storeId}/offerings", offering, HttpMethod.Post, token);
+    public async Task<OfferingModel> UpdateOffering(string storeId, string offeringId, OfferingModel offering, CancellationToken token = default)
+    => await SendHttpRequest<OfferingModel>($"api/v1/stores/{storeId}/offerings/{offeringId}", offering, HttpMethod.Put, token);
     public async Task<OfferingPlanModel> CreateOfferingPlan(string storeId, string offeringId, CreatePlanRequest request, CancellationToken token = default)
     => await SendHttpRequest<OfferingPlanModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/plans", request, HttpMethod.Post, token);
+    public async Task<OfferingPlanModel> UpdateOfferingPlan(string storeId, string offeringId, string planId, CreatePlanRequest request, CancellationToken token = default)
+    => await SendHttpRequest<OfferingPlanModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/plans/{planId}", request, HttpMethod.Put, token);
     public async Task<OfferingPlanModel> GetOfferingPlan(string storeId, string offeringId, string planId, CancellationToken token = default)
     => await SendHttpRequest<OfferingPlanModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/plans/{planId}", null, HttpMethod.Get, token);
 
@@ -26,30 +29,37 @@ public partial class BTCPayServerClient
         => await SendHttpRequest<PlanCheckoutModel>($"api/v1/plan-checkout/{checkoutId}", null, HttpMethod.Get, token);
 
     public async Task<CreditModel> GetCredit(string storeId, string offeringId, string customerSelector, string currency, CancellationToken token = default)
-        => await SendHttpRequest<CreditModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{Uri.EscapeDataString(customerSelector)}/credits/{currency}", null, HttpMethod.Get, token);
+        => await SendHttpRequest<CreditModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}/credits/{currency}", null, HttpMethod.Get, token);
 
     public async Task<CreditModel> UpdateCredit(string storeId, string offeringId, string customerSelector, string currency, UpdateCreditRequest request, CancellationToken token = default)
-        => await SendHttpRequest<CreditModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{Uri.EscapeDataString(customerSelector)}/credits/{currency}", request, HttpMethod.Post, token);
+        => await SendHttpRequest<CreditModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}/credits/{currency}", request, HttpMethod.Post, token);
 
     public async Task<PlanCheckoutModel> ProceedPlanCheckout(string checkoutId, string? email = null, CancellationToken token = default)
     {
         if (email is not null)
-            return await SendHttpRequest<PlanCheckoutModel>($"api/v1/plan-checkout/{checkoutId}?email={Uri.EscapeDataString(email)}", null, HttpMethod.Post, token);
+            return await SendHttpRequest<PlanCheckoutModel>($"api/v1/plan-checkout/{checkoutId}?email={email}", null, HttpMethod.Post, token);
         else
             return await SendHttpRequest<PlanCheckoutModel>($"api/v1/plan-checkout/{checkoutId}", null, HttpMethod.Post, token);
     }
     public async Task<SubscriberModel> GetSubscriber(string storeId, string offeringId, string customerSelector, CancellationToken token = default)
-    => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{Uri.EscapeDataString(customerSelector)}", null, HttpMethod.Get, token);
+    => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}", null, HttpMethod.Get, token);
+
+    public async Task DeleteSubscriber(string storeId, string offeringId, string customerSelector, CancellationToken token = default)
+        => await SendHttpRequest($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}", null, HttpMethod.Delete, token);
 
     public async Task<SubscriberModel> SuspendSubscriber(string storeId, string offeringId, string customerSelector, string? reason = null,
         CancellationToken token = default)
-        => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{Uri.EscapeDataString(customerSelector)}/suspend", new SuspendSubscriberRequest()
+        => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}/suspend", new SuspendSubscriberRequest()
             {
                 Reason = reason
             },
             HttpMethod.Post, token);
     public async Task<SubscriberModel> UnsuspendSubscriber(string storeId, string offeringId, string customerSelector, CancellationToken token = default)
         => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}/unsuspend", null, HttpMethod.Post, token);
+
+    public async Task<SubscriberModel> UpdateSubscriberDates(string storeId, string offeringId, string customerSelector,
+        UpdateSubscriberDatesRequest request, CancellationToken token = default)
+        => await SendHttpRequest<SubscriberModel>($"api/v1/stores/{storeId}/offerings/{offeringId}/subscribers/{customerSelector}/dates", request, HttpMethod.Put, token);
 
     public async Task<PortalSessionModel> CreatePortalSession(CreatePortalSessionRequest request, CancellationToken token = default)
         => await SendHttpRequest<PortalSessionModel>($"api/v1/subscriber-portal", request, HttpMethod.Post, token);

@@ -1,30 +1,17 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
-using AngleSharp.Dom;
-using BTCPayServer.Abstractions.Extensions;
-using BTCPayServer.BIP78.Sender;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.HostedServices;
-using BTCPayServer.Lightning;
-using BTCPayServer.Logging;
-using BTCPayServer.Models;
-using BTCPayServer.Models.InvoicingModels;
 using BTCPayServer.Plugins.Altcoins;
 using BTCPayServer.Services;
-using BTCPayServer.Services.Invoices;
 using NBitcoin;
-using NBitcoin.DataEncoders;
-using NBitpayClient;
 using NBXplorer.DerivationStrategy;
 using NBXplorer.Models;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using static Org.BouncyCastle.Math.EC.ECCurve;
-using StoreData = BTCPayServer.Data.StoreData;
 
 namespace BTCPayServer.Payments.Bitcoin
 {
@@ -297,6 +284,17 @@ namespace BTCPayServer.Payments.Bitcoin
             {
                 if (acc.AccountKey is null)
                     validationContext.ModelState.AddModelError(nameof(res.AccountKeySettings), "Missing AccountKey");
+            }
+
+            if (res.IsHotWallet)
+            {
+                var previous = validationContext.PreviousConfig?.ToObject<DerivationSchemeSettings>(Serializer);
+                if (previous?.IsHotWallet is not true ||
+                    previous.AccountDerivation?.ToString() != res.AccountDerivation?.ToString())
+                {
+                    validationContext.ModelState.AddModelError(nameof(res.IsHotWallet),
+                        "IsHotWallet cannot be set through this API. Generate or import a wallet with private keys instead.");
+                }
             }
             return Task.CompletedTask;
         }

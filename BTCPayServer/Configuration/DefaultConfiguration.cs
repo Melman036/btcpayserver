@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -11,7 +10,6 @@ using BTCPayServer.Plugins;
 using BTCPayServer.Plugins.Bitcoin;
 using CommandLine;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Configuration.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using NBitcoin;
 using NBXplorer;
@@ -34,18 +32,15 @@ namespace BTCPayServer.Configuration
             app.Option("--testnet | -testnet", $"Use testnet (deprecated, use --network instead)", CommandOptionType.BoolValue);
             app.Option("--regtest | -regtest", $"Use regtest (deprecated, use --network instead)", CommandOptionType.BoolValue);
             app.Option("--signet | -signet", $"Use signet (deprecated, use --network instead)", CommandOptionType.BoolValue);
-            app.Option("--chains | -c", $"Chains to support as a comma separated (default: btc; available: {chains})", CommandOptionType.SingleValue);
+            app.Option("--chains | -c", $"Chains to support as a comma separated. Default to empty if --nodefaultchain is set (default: btc; available: {chains})", CommandOptionType.SingleValue);
+            app.Option("--nodefaultchain | -nodefaultchain", "Allow BTCPay to start without any chain enabled (default: false)", CommandOptionType.BoolValue);
             app.Option("--postgres", $"Connection string to a PostgreSQL database", CommandOptionType.SingleValue);
             app.Option("--nocsp", $"Disable CSP (default false)", CommandOptionType.BoolValue);
             app.Option("--deprecated", $"Allow deprecated settings (default:false)", CommandOptionType.BoolValue);
             app.Option("--externalservices", $"Links added to external services inside Server Settings / Services under the format service1:path2;service2:path2.(default: empty)", CommandOptionType.SingleValue);
+            app.Option("--btcpayhostenabled", "Enable the btcpay-host integration (default: false)", CommandOptionType.BoolValue);
+            app.Option("--btcpayhostexecutable", "Path to the btcpay-host executable (default: btcpay-host)", CommandOptionType.SingleValue);
             app.Option("--rootpath", "The root path in the URL to access BTCPay (default: /)", CommandOptionType.SingleValue);
-            app.Option("--sshconnection", "SSH server to manage BTCPay under the form user@server:port (default: root@externalhost or empty)", CommandOptionType.SingleValue);
-            app.Option("--sshpassword", "SSH password to manage BTCPay (default: empty)", CommandOptionType.SingleValue);
-            app.Option("--sshkeyfile", "SSH private key file to manage BTCPay (default: empty)", CommandOptionType.SingleValue);
-            app.Option("--sshkeyfilepassword", "Password of the SSH keyfile (default: empty)", CommandOptionType.SingleValue);
-            app.Option("--sshauthorizedkeys", "Path to a authorized_keys file that BTCPayServer can modify from the website (default: empty)", CommandOptionType.SingleValue);
-            app.Option("--sshtrustedfingerprints", "SSH Host public key fingerprint or sha256 (default: empty, it will allow untrusted connections)", CommandOptionType.SingleValue);
             app.Option("--torrcfile", "Path to torrc file containing hidden services directories (default: empty)", CommandOptionType.SingleValue);
             app.Option("--torservices", "Tor hostnames of available services added to Server Settings (and sets onion header for btcpay). Format: btcpayserver:host.onion:80;btc-p2p:host2.onion:81,BTC-RPC:host3.onion:82,UNKNOWN:host4.onion:83. (default: empty)", CommandOptionType.SingleValue);
             app.Option("--socksendpoint", "Socks endpoint to connect to onion urls (default: empty)", CommandOptionType.SingleValue);
@@ -53,7 +48,7 @@ namespace BTCPayServer.Configuration
             app.Option("--debuglog", "A rolling log file for debug messages.", CommandOptionType.SingleValue);
             app.Option("--debugloglevel", "The severity you log (default:information)", CommandOptionType.SingleValue);
             app.Option("--disable-registration", "Disables new user registrations (default:true)", CommandOptionType.SingleValue);
-            app.Option("--recommended-plugins", "Plugins which would be marked as recommended to be installed. Separated by newline or space", CommandOptionType.MultipleValue);
+            app.Option("--recommended-plugins", "Deprecated. Accepted for compatibility but no longer used by the embedded plugin directory.", CommandOptionType.MultipleValue);
             app.Option("--xforwardedproto", "If specified, set X-Forwarded-Proto to the specified value, this may be useful if your reverse proxy handle https but is not configured to add X-Forwarded-Proto (example: --xforwardedproto https)", CommandOptionType.SingleValue);
             app.Option("--cheatmode", "Add some helper UI to facilitate dev-time testing (Default false)", CommandOptionType.BoolValue);
 
@@ -134,6 +129,10 @@ namespace BTCPayServer.Configuration
             builder.AppendLine("#bind=127.0.0.1");
             builder.AppendLine("#httpscertificatefilepath=devtest.pfx");
             builder.AppendLine("#httpscertificatefilepassword=toto");
+            builder.AppendLine();
+            builder.AppendLine("### Host integration ###");
+            builder.AppendLine("#btcpayhostenabled=false");
+            builder.AppendLine("#btcpayhostexecutable=btcpay-host");
             builder.AppendLine();
             builder.AppendLine("### Database ###");
             builder.AppendLine("#postgres=User ID=root;Password=myPassword;Host=localhost;Port=5432;Database=myDataBase;");

@@ -19,35 +19,38 @@ using Microsoft.Extensions.Localization;
 namespace BTCPayServer.Controllers
 {
     [Route("stores")]
-    [AutoValidateAntiforgeryToken]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
     public class UIUserStoresController : Controller
     {
         private readonly StoreRepository _repo;
         private readonly IStringLocalizer StringLocalizer;
-        private readonly UserManager<ApplicationUser> _userManager;
         private readonly DefaultRulesCollection _defaultRules;
         private readonly RateFetcher _rateFactory;
+        private readonly PoliciesSettings _policiesSettings;
+        private readonly UserManager<ApplicationUser> _userManager;
         public string CreatedStoreId { get; set; }
 
         public UIUserStoresController(
-            UserManager<ApplicationUser> userManager,
 			DefaultRulesCollection defaultRules,
             StoreRepository storeRepository,
             IStringLocalizer stringLocalizer,
-            RateFetcher rateFactory)
+            RateFetcher rateFactory,
+            PoliciesSettings policiesSettings,
+            UserManager<ApplicationUser> userManager)
         {
             _repo = storeRepository;
             StringLocalizer = stringLocalizer;
-            _userManager = userManager;
             _defaultRules = defaultRules;
             _rateFactory = rateFactory;
+            _policiesSettings = policiesSettings;
+            _userManager = userManager;
         }
 
         [HttpGet]
-        [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettingsUnscoped)]
-        public async Task<IActionResult> ListStores(bool archived = false)
+        [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
+        public IActionResult ListStores(bool archived = false)
         {
-            var stores = await _repo.GetStoresByUserId(GetUserId());
+            var stores = HttpContext.GetStoresData();
             var vm = new ListStoresViewModel
             {
                 Stores = stores
@@ -64,11 +67,107 @@ namespace BTCPayServer.Controllers
             return View(vm);
         }
 
+        // Deliberately not gated on a store policy: the invitee is not a member of the store yet.
+        [HttpGet("~/invitations/{token}")]
+        [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyProfile)]
+        [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+        public async Task<IActionResult> AcceptStoreInvitation(string token)
+        {
+            var vm = await BuildInvitationViewModel(token);
+            if (vm is null)
+                return NotFound();
+            return View(vm);
+        }
+
+        [HttpPost("~/invitations/{token}")]
+        [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyProfile)]
+        [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+        public async Task<IActionResult> AcceptStoreInvitation(string token, string command)
+        {
+            var vm = await BuildInvitationViewModel(token);
+            if (vm is null)
+                return NotFound();
+            if (vm.IsForAnotherUser)
+                return View(vm);
+
+            if (command == "decline")
+            {
+                await _repo.DeleteStoreInvitationByToken(User.GetId(), token);
+                TempData[WellKnownTempData.SuccessMessage] = StringLocalizer["Invitation declined."].Value;
+                return RedirectToAction(nameof(ListStores));
+            }
+
+            var result = await _repo.AcceptStoreInvitation(User.GetId(), token);
+            if (result is StoreRepository.AddOrUpdateStoreUserResult.Success or StoreRepository.AddOrUpdateStoreUserResult.DuplicateRole)
+            {
+                TempData[WellKnownTempData.SuccessMessage] = StringLocalizer["You have joined {0}.", vm.StoreName].Value;
+                var storeUser = await _repo.GetStoreUser(vm.StoreId, User.GetId());
+                var role = storeUser?.StoreRoleId is { } roleId ? await _repo.GetStoreRole(StoreRoleId.Parse(roleId)) : null;
+                return role?.Permissions.Contains(Policies.CanViewStoreSettings) is true
+                    ? RedirectToAction("Index", "UIStores", new { storeId = vm.StoreId })
+                    : RedirectToAction(nameof(ListStores));
+            }
+            if (result is null)
+            {
+                TempData[WellKnownTempData.ErrorMessage] = StringLocalizer["This invitation is no longer available."].Value;
+                return RedirectToAction(nameof(ListStores));
+            }
+            vm.Error = result.ToString();
+            return View(vm);
+        }
+
+        private async Task<StoreInvitationViewModel> BuildInvitationViewModel(string token)
+        {
+            // We do not pass the user id on purpose. The client verifies whether the invitation is valid for the current user.
+            var invitation = await _repo.GetStoreInvitationByToken(token);
+            if (invitation is null)
+                return null;
+
+            var vm = new StoreInvitationViewModel
+            {
+                Token = token,
+                StoreId = invitation.StoreId,
+                StoreName = invitation.StoreName,
+                InvitedEmail = invitation.UserEmail,
+            };
+            // Only the invited account may act on the link. Anyone else signed in, typically the
+            // owner testing their own link, gets told whose invitation it is rather than a 404.
+            if (invitation.UserId != User.GetId())
+            {
+                vm.InvitedEmail = invitation.UserEmail;
+                vm.IsForAnotherUser = true;
+                return vm;
+            }
+            vm.Role = StoreRoleId.Parse(invitation.RoleId).Role;
+            vm.Expiry = invitation.ExpiresAt;
+            vm.IsExpired = invitation.IsExpired();
+            return vm;
+        }
+
+
         [HttpGet("create")]
         [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettingsUnscoped)]
         public async Task<IActionResult> CreateStore(bool skipWizard)
         {
-            var stores = await _repo.GetStoresByUserId(GetUserId());
+            var userId = User.GetId();
+            var limit = await GetEffectiveStoreLimitAsync();
+            if (limit.HasValue)
+            {
+                var count = await _repo.CountStoresByUserId(userId);
+                if (count >= limit.Value)
+                {
+                    TempData.SetStatusMessageModel(new StatusMessageModel
+                    {
+                        Severity = StatusMessageModel.StatusSeverity.Error,
+                        Message = limit.Value == 0
+                            ? StringLocalizer["Store creation is not allowed on this server."].Value
+                            : StringLocalizer["You have reached the maximum number of stores allowed ({0}).", limit.Value].Value
+                    });
+                    return RedirectToAction(nameof(ListStores));
+                }
+            }
+
+            var stores = await _repo.GetStoresByUserId(userId);
             var defaultTemplate = await _repo.GetDefaultStoreTemplate();
             var blob = defaultTemplate.GetStoreBlob();
             var vm = new CreateStoreViewModel
@@ -88,9 +187,11 @@ namespace BTCPayServer.Controllers
         [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettingsUnscoped)]
         public async Task<IActionResult> CreateStore(CreateStoreViewModel vm)
         {
+            var userId = User.GetId();
+
             if (!ModelState.IsValid)
             {
-                var stores = await _repo.GetStoresByUserId(GetUserId());
+                var stores = await _repo.GetStoresByUserId(userId);
                 vm.IsFirstStore = !stores.Any();
                 var template = await _repo.GetDefaultStoreTemplate();
                 var defaultCurrency = template.GetStoreBlob().DefaultCurrency ?? StoreBlob.StandardDefaultCurrency;
@@ -109,7 +210,19 @@ namespace BTCPayServer.Controllers
                 rate.RateScripting = false;
             }
             store.SetStoreBlob(blob);
-            await _repo.CreateStore(GetUserId(), store);
+
+            var result = await _repo.CreateStore(User.GetId(), store);
+            if (result == StoreRepository.CreateStoreResult.QuotaExceeded)
+            {
+                ModelState.AddModelError(string.Empty, StringLocalizer["You have reached the maximum number of stores allowed."].Value);
+                var stores = await _repo.GetStoresByUserId(userId);
+                vm.IsFirstStore = !stores.Any();
+                var template = await _repo.GetDefaultStoreTemplate();
+                var defaultCurrency = template.GetStoreBlob().DefaultCurrency ?? StoreBlob.StandardDefaultCurrency;
+                vm.Exchanges = GetExchangesSelectList(defaultCurrency, null);
+                return View(vm);
+            }
+
             CreatedStoreId = store.Id;
             TempData.SetStatusSuccess(StringLocalizer["Store successfully created"]);
             return RedirectToAction(nameof(UIStoresController.Index), "UIStores", new
@@ -118,11 +231,20 @@ namespace BTCPayServer.Controllers
             });
         }
 
+        private async Task<int?> GetEffectiveStoreLimitAsync()
+        {
+            if (User.IsInRole(Roles.ServerAdmin))
+                return null;
+            var user = await _userManager.GetUserAsync(User);
+            var blob = user?.GetBlob();
+            return blob?.StoreQuota ?? _policiesSettings.StoreQuota;
+        }
+
         [HttpGet("{storeId}/me/delete")]
         [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
         public IActionResult DeleteStore(string storeId)
         {
-            var store = HttpContext.GetStoreData();
+            var store = HttpContext.GetStoreDataOrNull();
             if (store == null)
                 return NotFound();
             return View("Confirm", new ConfirmModel(StringLocalizer["Delete store {0}", store.StoreName], StringLocalizer["This store will still be accessible to users sharing it"], StringLocalizer["Delete"]));
@@ -132,16 +254,13 @@ namespace BTCPayServer.Controllers
         [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
         public async Task<IActionResult> DeleteStorePost(string storeId)
         {
-            var userId = GetUserId();
-            var store = HttpContext.GetStoreData();
+            var store = HttpContext.GetStoreDataOrNull();
             if (store == null)
                 return NotFound();
-            await _repo.RemoveStore(storeId, userId);
+            await _repo.RemoveStore(storeId, User.GetId());
             TempData.SetStatusSuccess(StringLocalizer["Store removed successfully"]);
             return RedirectToAction(nameof(UIHomeController.Index), "UIHome");
         }
-
-        private string GetUserId() => _userManager.GetUserId(User);
 
 		internal SelectList GetExchangesSelectList(string defaultCurrency, StoreBlob.RateSettings rateSettings)
 		{

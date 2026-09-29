@@ -1,8 +1,6 @@
 using System;
 using BTCPayServer.JsonConverters;
 using Newtonsoft.Json;
-using System.Globalization;
-using System.Linq;
 
 namespace BTCPayServer.Services.Apps
 {
@@ -42,9 +40,7 @@ namespace BTCPayServer.Services.Apps
         public string NotificationUrl { get; set; }
         public string Tagline { get; set; }
         public string PerksTemplate { get; set; }
-        public bool DisqusEnabled { get; set; }
         public bool SoundsEnabled { get; set; }
-        public string DisqusShortname { get; set; }
         public bool AnimationsEnabled { get; set; }
         public int ResetEveryAmount { get; set; } = 1;
         public CrowdfundResetEvery ResetEvery { get; set; } = CrowdfundResetEvery.Never;

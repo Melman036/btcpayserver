@@ -5,6 +5,7 @@ using System.Linq;
 using BTCPayServer.Abstractions.Models;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
+using Microsoft.Extensions.Localization;
 
 namespace BTCPayServer.Abstractions.Extensions
 {
@@ -30,6 +31,7 @@ namespace BTCPayServer.Abstractions.Extensions
             return viewData["BlazorAllowed"] is not false;
         }
 
+        [Obsolete("Use SetLayoutModel instead")]
         public static void SetActivePage<T>(this ViewDataDictionary viewData, T activePage, string title = null, string activeId = null)
             where T : IConvertible
         {
@@ -37,12 +39,13 @@ namespace BTCPayServer.Abstractions.Extensions
         }
 
         public static void SetTitle(this ViewDataDictionary viewData, string title) => viewData["Title"] = title;
+        public static void SetTitle(this ViewDataDictionary viewData, LocalizedString title) => viewData["Title"] = title.Value;
         public static string GetTitle(this ViewDataDictionary viewData) => viewData["Title"]?.ToString();
 
         public static void SetLayoutModel(this ViewDataDictionary viewData, LayoutModel model)
         {
             // Page Title
-            viewData["Title"] = model.Title ?? model.MenuItemId;
+            viewData.SetTitle(model.Title ?? model.MenuItemId);
             // Navigation
             viewData[ACTIVE_PAGE_KEY] = model.MenuItemId;
             viewData[ACTIVE_ID_KEY] = model.SubMenuItemId;
@@ -55,6 +58,7 @@ namespace BTCPayServer.Abstractions.Extensions
         public static bool IsCategory(this ViewDataDictionary viewData, WellKnownCategories category) =>
             IsCategory(viewData, LayoutModel.Map(category));
 
+        [Obsolete("Use SetLayoutModel instead")]
         public static void SetActivePage(this ViewDataDictionary viewData, string activePage, string category, string title = null, string activeId = null)
         => viewData.SetLayoutModel(new(activePage, title){ SubMenuItemId = activeId, ActiveCategory = category } );
 
@@ -167,10 +171,11 @@ namespace BTCPayServer.Abstractions.Extensions
 
         public static HtmlString ToBrowserDate(this DateTimeOffset date, string netFormat, string jsDateFormat = "short", string jsTimeFormat = "short")
         {
+            var relative = date.ToTimeAgo();
             var dateTime = date.ToString("o", CultureInfo.InvariantCulture);
             var displayDate = date.ToString(netFormat, CultureInfo.InvariantCulture);
             var tooltip = dateTime.Replace("T", " ");
-            return new HtmlString($"<time datetime=\"{dateTime}\" data-date-style=\"{jsDateFormat}\" data-time-style=\"{jsTimeFormat}\" data-initial=\"localized\" data-bs-toggle=\"tooltip\" data-bs-title=\"{tooltip}\">{displayDate}</time>");
+            return new HtmlString($"<time datetime=\"{dateTime}\" data-relative=\"{relative}\" data-date-style=\"{jsDateFormat}\" data-time-style=\"{jsTimeFormat}\" data-initial=\"localized\" data-bs-toggle=\"tooltip\" data-bs-title=\"{tooltip}\">{displayDate}</time>");
         }
 
         public static HtmlString ToBrowserDate(this DateTimeOffset date, DateDisplayFormat format = DateDisplayFormat.Localized)

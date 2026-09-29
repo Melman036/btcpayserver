@@ -85,7 +85,8 @@ namespace BTCPayServer.Controllers.Greenfield
             var user = await _userManager.FindByIdOrEmail(idOrEmail);
             if (user != null)
             {
-                return Ok(await ForAPI(user));
+                var canManageUsers = (await _authorizationService.AuthorizeAsync(User, null, Policies.CanManageUsers)).Succeeded;
+                return Ok(await ForAPI(user, canManageUsers));
             }
             return this.UserNotFound();
         }
@@ -98,6 +99,10 @@ namespace BTCPayServer.Controllers.Greenfield
             if (user is null)
             {
                 return this.UserNotFound();
+            }
+            if (request.Locked && await _userService.IsUserTheOnlyOneAdmin(new UserService.CanLoginContext(user)))
+            {
+                return this.CreateAPIError(403, "cannot-lock-only-admin", "This is the only enabled administrator and cannot be locked.");
             }
 
             var success = await _userService.SetDisabled(user.Id, request.Locked);
@@ -130,10 +135,11 @@ namespace BTCPayServer.Controllers.Greenfield
         public async Task<ActionResult<ApplicationUserData[]>> GetUsers()
         {
             var usersWithRoles = await _userService.GetUsersWithRoles();
+            var canManageUsers = (await _authorizationService.AuthorizeAsync(User, null, Policies.CanManageUsers)).Succeeded;
             List<ApplicationUserData> users = [];
             foreach (var user in usersWithRoles)
             {
-                users.Add(await UserService.ForAPI<ApplicationUserData>(user.User, user.Roles, _callbackGenerator, _uriResolver, Request));
+                users.Add(await UserService.ForAPI<ApplicationUserData>(user.User, user.Roles, _callbackGenerator, _uriResolver, Request, canManageUsers));
             }
             return Ok(users);
         }
@@ -143,7 +149,7 @@ namespace BTCPayServer.Controllers.Greenfield
         public async Task<ActionResult<ApplicationUserData>> GetCurrentUser()
         {
             var user = await _userManager.GetUserAsync(User);
-            return await ForAPI(user!);
+            return await ForAPI(user!, true);
         }
 
         [Authorize(Policy = Policies.CanModifyProfile, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
@@ -161,35 +167,37 @@ namespace BTCPayServer.Controllers.Greenfield
 
             bool needUpdate = false;
             var setNewPassword = !string.IsNullOrEmpty(request.NewPassword);
-            if (setNewPassword)
+            var email = user.Email;
+            var setNewEmail = !string.IsNullOrEmpty(request.Email) && request.Email != email && ModelState.IsValid;
+            var currentPasswordValid = (setNewPassword || setNewEmail)
+                                       && !string.IsNullOrEmpty(request.CurrentPassword)
+                                       && await _userManager.CheckPasswordAsync(user, request.CurrentPassword);
+            if ((setNewPassword || setNewEmail) && !currentPasswordValid)
             {
-                if (!await _userManager.CheckPasswordAsync(user, request.CurrentPassword))
+                ModelState.AddModelError(nameof(request.CurrentPassword), "The current password is not correct.");
+            }
+
+            if (setNewPassword && currentPasswordValid)
+            {
+                var passwordValidation = await _passwordValidator.ValidateAsync(_userManager, user, request.NewPassword);
+                if (passwordValidation.Succeeded)
                 {
-                    ModelState.AddModelError(nameof(request.CurrentPassword), "The current password is not correct.");
+                    var setUserResult = await _userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
+                    if (!setUserResult.Succeeded)
+                    {
+                        ModelState.AddModelError(nameof(request.Email), "Unexpected error occurred setting password for user.");
+                    }
                 }
                 else
                 {
-                    var passwordValidation = await _passwordValidator.ValidateAsync(_userManager, user, request.NewPassword);
-                    if (passwordValidation.Succeeded)
+                    foreach (var error in passwordValidation.Errors)
                     {
-                        var setUserResult = await _userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
-                        if (!setUserResult.Succeeded)
-                        {
-                            ModelState.AddModelError(nameof(request.Email), "Unexpected error occurred setting password for user.");
-                        }
-                    }
-                    else
-                    {
-                        foreach (var error in passwordValidation.Errors)
-                        {
-                            ModelState.AddModelError(nameof(request.NewPassword), error.Description);
-                        }
+                        ModelState.AddModelError(nameof(request.NewPassword), error.Description);
                     }
                 }
             }
 
-            var email = user.Email;
-            if (!string.IsNullOrEmpty(request.Email) && request.Email != email)
+            if (setNewEmail && currentPasswordValid && ModelState.IsValid)
             {
                 var setUserResult = await _userManager.SetUserNameAsync(user, request.Email);
                 if (!setUserResult.Succeeded)
@@ -204,6 +212,13 @@ namespace BTCPayServer.Controllers.Greenfield
             }
 
             var blob = user.GetBlob() ?? new();
+            if (request.AllowGreenfieldBasicAuth is { } allowGreenfieldBasicAuth &&
+                allowGreenfieldBasicAuth != blob.AllowGreenfieldBasicAuth)
+            {
+                blob.AllowGreenfieldBasicAuth = allowGreenfieldBasicAuth;
+                needUpdate = true;
+            }
+
             if (request.Name is not null && request.Name != blob.Name)
             {
                 blob.Name = request.Name;
@@ -239,7 +254,7 @@ namespace BTCPayServer.Controllers.Greenfield
             if (!ModelState.IsValid)
                 return this.CreateValidationError(ModelState);
 
-            var model = await ForAPI(user);
+            var model = await ForAPI(user, true);
             return Ok(model);
         }
 
@@ -271,7 +286,7 @@ namespace BTCPayServer.Controllers.Greenfield
                 user.SetBlob(blob);
                 await _userManager.UpdateAsync(user);
                 _eventAggregator.Publish(new UserEvent.Updated(user));
-                var model = await ForAPI(user);
+                var model = await ForAPI(user, true);
                 return Ok(model);
             }
             catch (Exception e)
@@ -302,10 +317,7 @@ namespace BTCPayServer.Controllers.Greenfield
 
         [Authorize(Policy = Policies.CanDeleteUser, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
         [HttpDelete("~/api/v1/users/me")]
-        public async Task<IActionResult> DeleteCurrentUser()
-        {
-            return await DeleteUser(_userManager.GetUserId(User)!);
-        }
+        public Task<IActionResult> DeleteCurrentUser() => DeleteUser(User.GetId());
 
         [AllowAnonymous]
         [HttpPost("~/api/v1/users")]
@@ -414,7 +426,7 @@ namespace BTCPayServer.Controllers.Greenfield
                 }
             }
             _eventAggregator.Publish(await UserEvent.Registered.Create(user, await _userManager.GetUserAsync(User), _callbackGenerator, request.SendInvitationEmail is not false));
-            var model = await ForAPI(user);
+            var model = await ForAPI(user, true);
             return CreatedAtAction(string.Empty, model);
         }
 
@@ -448,10 +460,10 @@ namespace BTCPayServer.Controllers.Greenfield
             return Ok();
         }
 
-        private async Task<ApplicationUserData> ForAPI(ApplicationUser data)
+        private async Task<ApplicationUserData> ForAPI(ApplicationUser data, bool includeInvitationUrl)
         {
             var roles = (await _userManager.GetRolesAsync(data)).ToArray();
-            return await UserService.ForAPI<ApplicationUserData>(data, roles, _callbackGenerator, _uriResolver, Request);
+            return await UserService.ForAPI<ApplicationUserData>(data, roles, _callbackGenerator, _uriResolver, Request, includeInvitationUrl);
         }
     }
 }

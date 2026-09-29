@@ -18,7 +18,7 @@ public class UpdateApplicationUserRequest
     public string Email { get; set; }
 
     /// <summary>
-    /// current password of the user
+    /// current password of the user, required to change the email or the password
     /// </summary>
     public string CurrentPassword { get; set; }
 
@@ -26,4 +26,9 @@ public class UpdateApplicationUserRequest
     /// new password of the user
     /// </summary>
     public string NewPassword { get; set; }
+
+    /// <summary>
+    /// whether to allow Basic authentication for the Greenfield API
+    /// </summary>
+    public bool? AllowGreenfieldBasicAuth { get; set; }
 }

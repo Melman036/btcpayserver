@@ -1,5 +1,298 @@
 # Changelog
 
+## 2.4.4
+
+### Breaking changes
+
+* **Checkout**: NFC payments are now disabled by default. Enable them under Store Settings > Checkout Experience. This change was introduced in 2.4.3 but was missing from its release notes. @rockstardev
+* **Invoices**: Block zero-amount invoices by default. Stores can allow them in their settings (#7514) @NicolasDorier
+* **Boltcards**: Remove the desktop smartcard setup and open the Boltcard app instead (#7515) @NicolasDorier
+* **Store users**: Users must accept an invitation before joining a store (#7519) @dstrukt
+* **Point of Sale**: Remove the per-request `notificationUrl`. Invoices now use the app's configured notification URL @Kukks
+* **Server administration**: Remove legacy SSH settings and add deployment-provided `btcpay-host` integration, including `btcpay-host env` ([documentation](https://docs.btcpayserver.org/Operators/host-integration/#host-integration)) (#7511 #7543) @NicolasDorier
+* **API Keys**: Use API key IDs instead of secrets for Greenfield API revocation (#7561) @NicolasDorier
+* **Bitpay API**: Remove legacy BitPay Basic-auth API keys (#7561) @NicolasDorier
+
+### New features
+
+* **Stores**: Add invitations for store users (#7519) @dstrukt
+* **Email Rules**: Add `StoreInvitePending` and `StoreUserJoined` triggers (#7519) @dstrukt
+* **Rates**: Support the Chilean Unidad de Fomento by recommending Bitpay for the `CLF` currency (#7522) @Shuaibu78
+
+### Fixes
+
+* **Crowdfund**: Keep the main image and last-updated date when contributions change (#7487) @inauman
+* **Reports**: Display short values correctly and hide broken explorer links (#7506) @Psycarlo
+* **Invoices**: Require permission to change an invoice's state (#7514) @NicolasDorier
+* **Wallet**: Show an empty label instead of the wallet derivation scheme (#7521) @TChukwuleta
+* **Plugins**: Show details and install actions for unlisted plugins found through search or direct links (#7524) @thgO-O
+* **Point of Sale**: Fix checkout when products share the same title (#7540) @comwanga
+* **Rates**: Replace the unavailable CryptoMarket provider with Notbank and update existing rate rules (#7526) @NicolasDorier
+* **Rates**: Ignore invalid BTCTurk prices where the bid is higher than the ask @NicolasDorier
+* **Payment Requests**: Do not add empty reference IDs to invoice searches @NicolasDorier
+* Log users out immediately when they are demoted, disabled, unapproved, or have their email confirmation revoked (#7529) @NicolasDorier
+* Keep monetization subscriptions from re-enabling accounts disabled by an administrator (#7523) @TChukwuleta
+* **Greenfield**: Prevent restricted API keys from creating unrestricted keys (#7531) @NicolasDorier
+* **Greenfield**: Prevent disabling the last active server administrator (#7541) @TChukwuleta
+* **Greenfield**: Honor the server policy that lets store owners add users without invitations (#7565) @NicolasDorier
+* **Stores**: Block unsafe support links to prevent script injection (#7537) @TChukwuleta
+* **API Keys**: Keep new API keys out of authorization redirect URLs (#7542) @TChukwuleta
+* **Maintenance**: Validate hostnames before changing a domain @NicolasDorier
+* **Account security**: Require the current password when changing an account email (low impact, reported by llen)
+
+### Improvements
+
+* **Reports**: Sort invoice report rows from oldest to newest (#7512) @kevin-ta
+* **Rates**: Request only supported currency pairs from Kraken (#7472) @ZenulAbidin
+* **Plugins**: Allow payment methods to validate settings for the current store (#7513) @NicolasDorier
+* **Greenfield SDK**: Safely encode values in API URLs (#7530) @NicolasDorier
+* Hide breadcrumbs that only repeat the page title (#7517) @NicolasDorier
+* **Monetization**: Show a useful message instead of a 404 when Manage billing is unavailable (#7516) @NicolasDorier
+* **API Keys**: Store API key hashes instead of plaintext secrets and show key IDs and creation dates (#7561) @NicolasDorier
+
+## 2.4.3
+
+This is a security release; updating is recommended for servers shared with many users.
+
+## 2.4.2
+
+This release contains fix of a critical vulnerability that is being actively exploited. You need to update as fast as you can.
+We recommend integrators to also update NBXplorer to version 2.6.10.
+
+Those have been reported to us by @brunoerg and @benthecarman from the Bitcoin Red Team effort.
+
+### Breaking change
+
+* Greenfield: Disable Basic authentication by default five minutes after account creation, with opt-in available through account settings and the API (#7492) @NicolasDorier
+
+We are not aware of any user impacted by this breaking change, as API Keys authentication is generally used.
+
+### New features
+
+* Wallet: Allow hiding, showing, and reordering transaction table columns (#7474) @dstrukt
+
+### Fixes
+
+* Wallet: Improve multisig PSBT signing and finalization reliability, including compatibility with newer HWI and Jade firmware versions (#7484 #7488) @rockstardev
+* Fix RTL stylesheets not loading correctly (#7482) @teamssUTXO
+* Fix TOTP two-factor authentication bypass via Greenfield Basic authentication (#7491) @NicolasDorier
+
+### Improvements
+
+* Improve the layout and readability of store settings pages (#7448) @dstrukt
+* Payment Requests: Rate limit public invoice creation @NicolasDorier
+
+## 2.4.1
+
+### New features
+
+* Plugins: Improve the plugin directory page (#7381) @thgO-O
+* Wallet: Add BIP-329 label import (#7457) @atharrva01
+* Invoices: Add editable invoice comments, including Greenfield API and report export support (#7444) @dstrukt
+* Email Rules: Add a new trigger for invoice refunds (#7374) @Abhijay007
+* Greenfield: Support `payoutMethods` array when refunding invoices (#7413) @atharrva01
+* Greenfield: Support `includePaymentMethods` on get invoice (#7426) @atharrva01
+* Allow time zone configuration in date range selectors (#7424) @NicolasDorier
+* Add more relevant default date range filters such as `This month`, `This week`, `This quarter` (#7424) @NicolasDorier
+* Adapt the UI for Right-To-Left (RTL) languages such as Arabic, Hebrew, and Persian (#7428) @teamssUTXO @AdilElFarissi
+
+### Fixes
+
+* Fix Boltcard payments that stopped working @Kukks
+* Fix LNDHub not being enabled by default (#7418) @NicolasDorier
+* Fix server admins unable to view a user's store @NicolasDorier
+* Fix NBXplorer error rendering (#7421) @MichaelRihani
+* Fix plugin command processing crash on Windows (#7422) @Kukks
+* Fix DASH default rate calculation and use Kraken for DASH rates (#7446) @NicolasDorier @ktechmidas
+* Fix untranslated Blazor UI strings (#7423) @Wiredancer
+* Pull Payments: Return 404 instead of 500 when opening payouts for a missing Pull Payment (#7429) @atharrva01
+* Greenfield: Unnest payout-related routes by making `storeId` optional. (#7433) @atharrva01
+* Wallet: Allow recommended fees below 1 sat/vbyte on the send screen (#7437) @NicolasDorier
+* Wallet: Refresh label filter dropdown after adding labels inline (#7436) @TowyTowy
+* Fix Custom Range formatting in the date range selector (#7439) @NicolasDorier
+* Fix Core Lightning compatibility issues (#7449) @NicolasDorier
+* Fix Boltcards payments @NicolasDorier
+* Fix  Core lightning fundchannel feerate by passing NBitcoin FeePerK value directly as perkb. (#7449) @thgO-O
+* Fix c-lightning MaxFeePercent being sent to xpay in satoshi instead of millisatoshi (#7449) @TowyTowy
+* Fix the `Mark as seen` button in the notification list (#7424) @NicolasDorier
+* Fix incorrect date range filtering across DST boundaries (#7424) @NicolasDorier
+
+### Improvements
+
+* Use the browser's preferred hour format in the date time picker (#7424) @NicolasDorier
+* Add a Manage Labels link to Bitcoin Wallet labels (#7435) @NicolasDorier
+* Unify reports’ page time range selection (#7438) @NicolasDorier
+* Add tooltips to global navigation icons (#7443) @Pavlenex
+* Standardize topbar dropdown menus (#7425) @thgO-O
+* Improve topbar visual separation (#7445) @Pavlenex
+* Keep store settings navigation expanded and highlighted on subpages (#7452) @dstrukt
+* Remove misleading error logs on the first installation @NicolasDorier
+* Make global search more forgiving (#7461) @NicolasDorier
+* Update default global search bar suggestions (#7466) @NicolasDorier
+
+## 2.4.0
+
+See the [blog post announcement](https://blog.btcpayserver.org/btcpay-server-2-4-0/).
+
+### Breaking changes
+
+* LNBank and Lightning Charge backends are no longer supported.
+* If you use Boltcards Extension or Shopify v2 plugins, you will need to upgrade to the latest version of the plugin.
+
+### New features
+
+* Add multisig wallet setup (#7218) @thgO-O
+* Add a global search bar to improve navigation (#7183) @NicolasDorier
+* Add loginless and passwordless passkey authentication (#7172) @bitcoinbrisbane @NicolasDorier
+* Add more granular permissions for wallet management (#7357) @thgO-O
+* Subscription: Allow credit refunds via Pull Payments (#7284) @TChukwuleta
+* Subscription: Allow subscribers and customers to modify their notification email in the portal (#7300) @TChukwuleta
+* Point of Sale: Add configuration for tax on tips (#7298) @TChukwuleta
+* Point of Sale: Allow merchants to configure tax inclusion or exclusion (#7290) @TChukwuleta
+* Wallet: Add transaction search and date filters (#7133) @Sup3rlativ3
+* Add Bitcoin.co.ke rate provider (#7370) @sixside
+* Allow setting the maximum number of stores per user (#7320) @Abhijay007
+* Allow server admins to specify whether invited users subscribe to monetization (#7318) @TChukwuleta
+* Add separate `CanSendStoreEmail` permission for the store email API (#7345) @Abhijay007
+* Can bulk archive pull payments (#7400) @TChukwuleta
+
+### Fixes
+
+* Fix: Archiving invoices with a custom range filter returned error 403 (#7383 #7386) @NicolasDorier
+* Fix invalid Yadio rate handling (#7377) @BuffaloDyl
+* Fix iOS touch lockup on Keypad Point of Sale item buttons (#7379) @Wiredancer
+* Fix a corrupted table in the "Enter your xpub" screen @NicolasDorier
+* Fix searched text corrupting the search filter (#7338) @NicolasDorier
+* Fix BTCPay Server hanging on shutdown when Bitcoin support is disabled @NicolasDorier
+* Prevent 2FA code submission when the authenticator is not configured @NicolasDorier
+* Invoice Date Filter - Date Selector Widget closes the month list when clicked (#7384 #7388) @senutpal
+* Invoice Date Filter - Date Selector Widget had month dropdown with white text on a white background in Dark Mode (#7385) @senutpal
+* Refunds and pull payments were unable to make payments from LND 0.21.0 (https://github.com/btcpayserver/BTCPayServer.Lightning/pull/178) @warioishere
+* Uninstall button is missing for language packs (#7390 #7392) @teamssUTXO
+* Lightning invoice silently dropped when the node doesn't return amount on reconnection (#7402) @atharrva01
+* The Server Policies page would timeout when the server had too many apps (#7406) @NicolasDorier
+* Fix support for Core lightning 26.06 (#7412) @NicolasDorier
+
+### Improvements
+
+* Show missing permissions on the 403 page (#7387) @NicolasDorier
+* Adds inline QR and copy actions to the `Store Id` field on the Store Settings page. (#7396) @BuffaloDyl
+* Unnest UI routes for Pull Requests, Pull Payments, Invoices, and Apps (#7368) @NicolasDorier
+* Improve language pack selection (#7347) @teamssUTXO
+* Display Bylls as Bull Bitcoin in rate sources (#7364) @BullishNode
+
+### Miscellaneous
+
+* Remove deprecated Shopify Scripts integration (#6608) @NicolasDorier
+* Deprecate LCAD (#7363) @BullishNode
+* Remove support of some lightning backends: Lightning Charge, LNDHub, LNBank.
+
+## 2.3.9
+
+### Fixes
+
+* Fix: Server not recovering after a plugin crash (#7335) @NicolasDorier
+* Fix: Xpub became unparseable in 2.3.8 (#7334) @NicolasDorier
+
+## 2.3.8
+
+### New Features
+
+* API/Subscriptions: Add update offering route (#7296) @NicolasDorier
+* API/Subscriptions: Add update offering plan (#7297) @NicolasDorier
+* PoS: View-only store users can browse login links and invoices from the Update PoS page (#7305) @NicolasDorier
+* PoS: Store users can now generate a login QR code for any other store user (#7303) @NicolasDorier
+* Add LUD-21 (LNURL-pay Verify) support (#7250) @r0ckstardev
+* Add reporting for subscriptions (#7299) @TChukwuleta
+
+### Fixes
+
+* Fix: Reserved addresses page should not show addresses from old wallets (#7304) @thgO-O
+* Fix: QR code logins should not expire after only a few hours (#6801 #7293) @TChukwuleta
+* Fix: Avoid double translation of already localized view content (#7314 #7315) @Sanja22B
+* Fix: Phoenixd incorrectly marks payment as partial (#7325) @NicolasDorier
+* Fix: Top-Up invoices paid by BOLT11 should become settled (#7322 #7323) @notraiday
+
+### Miscellaneous
+
+* Remove support for importing keys to Bitcoin wallet via RPC (#7307) @NicolasDorier
+
+## 2.3.7
+
+This release is the first release using .NET 10.
+We invite plugin developers to [follow our guide](https://blog.btcpayserver.org/migrating-to-net10/) for a smoother migration.
+
+We recommend that users update their plugins after upgrading to 2.3.7.
+
+### New Features
+
+* Wallets: Add the ability to add comment to the transaction on the Send view (#6687 #7265) @Abhijay007
+* Subscriptions: Add manual subscription date editing for admins (#7231 #7257) @Abhijay007
+* Invoices: When the lightning provider supports it, top-up invoices now generate an amount-less BOLT11 instead of LNURL. (#7263) @bigg-bb
+* Plugins: Add the Update button to the disabled plugins section (#7051 #7260) @rollforsats
+* Subscriptions: SubscriberDisabled webhook now includes the reason why the subscriber has been disabled (#7270) @NicolasDorier
+* Greenfield: Implement UpdateCrowdfundApp endpoint and client method (#7202) @webiumsk
+* Subscriptions/API: Can delete subscribers via UI and API (#7206 #7254) @NicolasDorier
+* Invoices: Add RTL Language support (Arabic, Hebrew, and Farsi) for invoice checkout (#444 #7259) @Abhijay007
+* Invoices: Show payment method on receipt (#7174 #7226) @TChukwuleta
+* Subscriptions: Allow upgrade/downgrade at the period end (#7147 #7258) @TChukwuleta
+
+### Fixes
+
+* Fix: If an admin was accessing a user's store from a user list, it was returning error 404 @NicolasDorier
+* Emails: skip SMTP AUTH when Login and Password are empty (#7267 #7269) @ThomsenDrake
+* Fix: Wallet balance time period switch was broken (#7246 #7247) @Abhijay007
+* Exclude trial subscribers from monthly revenue (#7272 #7273) @Abhijay007
+
+## 2.3.6
+
+### New Features
+
+* Wallets: Add filtering using search bar on the label filter dropdown when labels exceed more than 20 (#7210 #7109) @rollforsats
+* API: Include a payment method in the Get invoices endpoint (#6757 #2394) @TChukwuleta
+* BTCPay Invoice Modal: Add a `paymentMethodId` parameter (#7209 #7208) @pwnfoo
+* Security: Include API key permission analysis metadata (#6771 #3196) @TChukwuleta
+* A plugin can now create new permission policies (#7215 #7156) @NicolasDorier
+
+### Fixes
+
+* Fix: Dashboard layout issues on mobile, regression from 2.3.5 (#7223 #7217) @NicolasDorier
+* Fix: Subscriber portal sessions can be created again via API (#7200 #7198) @NicolasDorier
+* Fix: Can't upgrade/downgrade a Lifetime subscription (#7194 #7193) @NicolasDorier
+
+### Improvements
+
+* Update Wasabi wallet folder access instructions (#7192) @nopara73
+* Security: Apply CSRF protection globally to UI controllers (#7199) @NicolasDorier
+* Update many missing translations from the language packs @Abhijay007
+
+### Regression
+
+* Revert: Dashboard: Support multi-crypto wallet balance widgets (#7223) @NicolasDorier
+
+## 2.3.5
+
+### New Features
+
+* Allow BTCPay Server to start without any on-chain payment methods with `BTCPAY_NODEFAULTCHAIN` (#7180) @NicolasDorier
+* Add custom textbox for checkout (#7182) @pavlenex
+* Add CoinDCX rate provider for BTC/INR rates (#7173) @Abhijay007
+* Add Desiboard rate provider for BTC/USD and BTC/INR rates (#7169) @Abhijay007
+* Dashboard: Support multi-crypto wallet balance widgets (#7110) @Sup3rlativ3
+* Ability to update a previously downloaded language pack (#7185) @Abhijay007
+
+### Fixes
+
+* Fix: Images in Point of Sale Cart doesn't show on mobile (#7190) @NicolasDorier
+* Fix: Payments getting undetected on LND when the node restarted (#7176) @rockstardev
+* Fix: Do not show claim button in pull payments if it is archived (#7154 #7167) @NicolasDorier
+* Fix: Unable to edit roles when navigating from store level to Roles (#7157) @rockstardev
+
+### Improvements
+
+* Throttle Greenfield API calls with Basic auth (#7177) @NicolasDorier
+* Added missing translations strings for various files (#6897) @Abhijay007
+
 ## 2.3.4
 
 ### New Features
@@ -1347,13 +1640,13 @@ Update recommended for shared instances.
 
 With this release, we are providing a migration path for legacy MySql and SQLite installations.
 
-If you are a BTCPay Server integrators such as developer of Raspiblitz, Umbrel, Embassy OS or anybody running BTCPay Server on SQLite or MySql, please refer to [the documentation](docs/db-migration.md).
+If you are a BTCPay Server integrators such as developer of Raspiblitz, Umbrel, Embassy OS or anybody running BTCPay Server on SQLite or MySql, please refer to [the documentation](https://github.com/btcpayserver/btcpayserver/blob/v1.13.7/docs/db-migration.md).
 
 While SQLite and MySQL should still be working for one year or two, we will not fix bugs related to those backend. (unless it impacts migration)
 
 ### New feature
 
-* Add ability to migrate from MySQL/SQLite to Postgres backend. (#4614) Please read [the documentation](docs/db-migration.md). @NicolasDorier
+* Add ability to migrate from MySQL/SQLite to Postgres backend. (#4614) Please read [the documentation](https://github.com/btcpayserver/btcpayserver/blob/v1.13.7/docs/db-migration.md). @NicolasDorier
 
 ### Bug fixes
 
@@ -2887,7 +3180,7 @@ Those are low risk injection vulnerabilities.
 
 ### Altcoins
 
-* BTCPay Server build is Bitcoin Only by default. If you are developer and wants to work on the altcoins build, please read [the documentation](https://docs.btcpayserver.org/LocalDevelopment/).
+* BTCPay Server build is Bitcoin Only by default. If you are developer and wants to work on the altcoins build, please read [the documentation](https://github.com/btcpayserver/btcpayserver/blob/master/docs/maintainers/local-development.md).
 * Show sync progress for monero and show amount of monero payment #1729 @xpayserver
 
 ## 1.0.5.3:
@@ -3058,7 +3351,7 @@ Those are low risk injection vulnerabilities.
   * Arabic (Ar) @kemoantemo
   * Bosnian (Bosnia and Herzegovina) (bs_BA) @Ruxiol
   * Danish (Denmark) (da_DK) @Berlelund
-  * German (Germany) (de_DE)[@andhans](https://twitter.com/andhans_jail)
+  * German (Germany) (de_DE)[@andhans](https://x.com/andhans_jail)
   * Greek (Greece) (el_GR) @kaloudis
   * Spanish (Spain) (es_ES) @RzeroD
   * Hindi(hi) @blockbitmedia

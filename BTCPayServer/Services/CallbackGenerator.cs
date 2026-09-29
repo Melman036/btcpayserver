@@ -1,20 +1,15 @@
 #nullable enable
 using System;
-using System.Reflection.Emit;
 using System.Threading.Tasks;
 using BTCPayServer.Data;
 using BTCPayServer.Abstractions.Extensions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Mvc;
-using NBitcoin.Altcoins.ArgoneumInternals;
 using BTCPayServer.Controllers;
-using Microsoft.AspNetCore.Mvc.Routing;
-using Microsoft.AspNetCore.Http.Extensions;
+using BTCPayServer.Plugins.Wallets;
 using NBitcoin.DataEncoders;
-using System.Runtime.CompilerServices;
 using BTCPayServer.Abstractions;
 
 namespace BTCPayServer.Services
@@ -22,7 +17,8 @@ namespace BTCPayServer.Services
     public class CallbackGenerator(
         LinkGenerator linkGenerator,
         UserManager<ApplicationUser> userManager,
-        IHttpContextAccessor httpContextAccessor)
+        IHttpContextAccessor httpContextAccessor,
+        ISettingsAccessor<ServerSettings> serverSettings)
     {
         public LinkGenerator LinkGenerator { get; } = linkGenerator;
         public UserManager<ApplicationUser> UserManager { get; } = userManager;
@@ -36,7 +32,20 @@ namespace BTCPayServer.Services
             GetRequestBaseUrl());
 
         public RequestBaseUrl GetRequestBaseUrl()
-        => BaseUrl ?? httpContextAccessor.HttpContext?.Request.GetRequestBaseUrl() ?? throw new InvalidOperationException($"You should be in a HttpContext to call this method");
+        {
+            if (BaseUrl is not null)
+                return BaseUrl;
+            var configuredBaseUrl = serverSettings.Settings.BaseUrl;
+            if (!string.IsNullOrEmpty(configuredBaseUrl) &&
+                RequestBaseUrl.TryFromUrl(configuredBaseUrl, out var baseUrl))
+                return baseUrl;
+            return httpContextAccessor.HttpContext?.Request.GetRequestBaseUrl() ??
+                   throw new InvalidOperationException($"You should be in a HttpContext to call this method");
+        }
+
+        public string StoreInvitationLink(string token)
+        => LinkGenerator.GetUriByAction(nameof(UIUserStoresController.AcceptStoreInvitation), "UIUserStores",
+            new { token }, GetRequestBaseUrl());
 
         public string StoreUsersLink(string storeId)
         => LinkGenerator.GetUriByAction(nameof(UIStoresController.StoreUsers), "UIStores",
@@ -81,7 +90,7 @@ namespace BTCPayServer.Services
         => LinkGenerator.GetUriByAction(
             action: nameof(UIWalletsController.WalletTransactions),
             controller: "UIWallets",
-            values: new { walletId = walletId.ToString() },
+            values: new { area = WalletsPlugin.Area, walletId = walletId.ToString() },
             GetRequestBaseUrl());
 
         public string PaymentRequestByIdLink(string payReqId)

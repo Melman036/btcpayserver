@@ -1,12 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <Import Project="../Build/Common.csproj" />
   <PropertyGroup>
-    <NoWarn>$(NoWarn),xUnit1031</NoWarn>
+    <NoWarn>$(NoWarn),xUnit1031,xUnit1051,xUnit1069</NoWarn>
     <IsPackable>false</IsPackable>
     <UserSecretsId>AB0AC1DD-9D26-485B-9416-56A33F268117</UserSecretsId>
     <!--https://devblogs.microsoft.com/aspnet/testing-asp-net-core-mvc-web-apps-in-memory/-->
     <PreserveCompilationContext>true</PreserveCompilationContext>
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
   </PropertyGroup>
 
   <ItemGroup>
@@ -40,15 +41,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
-    <PackageReference Include="Microsoft.Playwright" Version="1.57.0" />
-    <PackageReference Include="Newtonsoft.Json.Schema" Version="3.0.16" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="8.0.11" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
-    </PackageReference>
+    <PackageReference Include="Microsoft.Playwright" Version="1.62.0" />
+    <PackageReference Include="Microsoft.Testing.Extensions.GitHubActionsReport" Version="1.0.0-alpha.26377.5" />
+    <PackageReference Include="Newtonsoft.Json.Schema" Version="4.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="10.0.11" />
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
   <ItemGroup>
     <None Update=".dockerignore">

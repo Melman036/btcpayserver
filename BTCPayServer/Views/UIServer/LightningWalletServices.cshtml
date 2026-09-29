@@ -2,18 +2,11 @@
 @{
     ViewData.SetLayoutModel(new LayoutModel(nameof(ServerNavPages.Services), Model.WalletName)
         .SetCategory(WellKnownCategories.Server));
+    ViewData.SetBreadcrumbs([new(StringLocalizer["Services"], Action: nameof(BTCPayServer.Controllers.UIServerController.Services))]);
 }
 
 <div class="sticky-header">
-    <nav aria-label="breadcrumb">
-        <ol class="breadcrumb">
-            <li class="breadcrumb-item">
-                <a asp-action="Services" text-translate="true">Services</a>
-            </li>
-            <li class="breadcrumb-item active" aria-current="page" text-translate="true">@ViewData["Title"]</li>
-        </ol>
-        <h2 text-translate="true">@ViewData["Title"]</h2>
-    </nav>
+    <vc:title-header />
 </div>
 <partial name="_StatusMessage" />
 
@@ -34,6 +27,7 @@
         {
             <div asp-validation-summary="All"></div>
         }
+        <div class="settings-section">
         <div class="form-group">
             <h5 text-translate="true">Browser connection</h5>
             <p>
@@ -62,6 +56,7 @@
                     <div id="qrCodeData" data-url="@Model.ServiceLink"></div>
                 </div>
             }
+        </div>
         </div>
     </div>
 </div>

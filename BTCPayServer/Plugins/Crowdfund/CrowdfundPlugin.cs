@@ -3,16 +3,12 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
-using BTCPayServer.Abstractions.Services;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Configuration;
 using BTCPayServer.Data;
-using BTCPayServer.Models;
 using BTCPayServer.Payments;
-using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Plugins.Crowdfund.Controllers;
 using BTCPayServer.Plugins.Crowdfund.Models;
 using BTCPayServer.Services;
@@ -55,6 +51,7 @@ namespace BTCPayServer.Plugins.Crowdfund
         private readonly InvoiceRepository _invoiceRepository;
         private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly PrettyNameProvider _prettyNameProvider;
+        private readonly HtmlSanitizer _htmlSanitizer;
         public const string AppType = "Crowdfund";
 
         public CrowdfundAppType(
@@ -65,7 +62,8 @@ namespace BTCPayServer.Plugins.Crowdfund
             PrettyNameProvider prettyNameProvider,
             DisplayFormatter displayFormatter,
             IHttpContextAccessor httpContextAccessor,
-            CurrencyNameTable currencyNameTable)
+            CurrencyNameTable currencyNameTable,
+            HtmlSanitizer htmlSanitizer)
         {
             Description = Type = AppType;
             _linkGenerator = linkGenerator;
@@ -76,6 +74,7 @@ namespace BTCPayServer.Plugins.Crowdfund
             _currencyNameTable = currencyNameTable;
             _invoiceRepository = invoiceRepository;
             _prettyNameProvider = prettyNameProvider;
+            _htmlSanitizer = htmlSanitizer;
         }
 
         public override Task<string> ConfigureLink(AppData app)
@@ -190,13 +189,15 @@ namespace BTCPayServer.Plugins.Crowdfund
                 ? _linkGenerator.GetPathByAction(nameof(UICrowdfundController.CrowdfundForm), "UICrowdfund",
                     new { area = CrowdfundPlugin.Area, appId = appData.Id }, _options.Value.RootPath)
                 : null;
+            foreach (var perk in perks)
+                perk.Description = _htmlSanitizer.Sanitize(perk.Description ?? "");
             var vm =  new ViewCrowdfundViewModel
             {
                 Title = settings.Title,
                 Tagline = settings.Tagline,
                 HtmlLang = settings.HtmlLang,
                 HtmlMetaTags= settings.HtmlMetaTags,
-                Description = settings.Description,
+                Description = _htmlSanitizer.Sanitize(settings.Description ?? ""),
                 StoreName = store.StoreName,
                 StoreId = appData.StoreDataId,
                 AppId = appData.Id,
@@ -207,9 +208,7 @@ namespace BTCPayServer.Plugins.Crowdfund
                 EnforceTargetAmount = settings.EnforceTargetAmount,
                 Perks = perks,
                 Enabled = settings.Enabled,
-                DisqusEnabled = settings.DisqusEnabled,
                 SoundsEnabled = settings.SoundsEnabled,
-                DisqusShortname = settings.DisqusShortname,
                 AnimationsEnabled = settings.AnimationsEnabled,
                 ResetEveryAmount = settings.ResetEveryAmount,
                 ResetEvery = Enum.GetName(typeof(Services.Apps.CrowdfundResetEvery), settings.ResetEvery),

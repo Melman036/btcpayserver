@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -22,7 +23,7 @@ public partial class UIStoresController
     [HttpGet("{storeId}/settings")]
     public async Task<IActionResult> GeneralSettings(string storeId)
     {
-        var store = HttpContext.GetStoreData();
+        var store = HttpContext.GetStoreDataOrNull();
         if (store == null) return NotFound();
 
         var storeBlob = store.GetStoreBlob();
@@ -170,7 +171,7 @@ public partial class UIStoresController
         {
             await _storeRepo.UpdateStore(CurrentStore);
 
-            TempData[WellKnownTempData.SuccessMessage] = "Store successfully updated";
+            TempData[WellKnownTempData.SuccessMessage] = StringLocalizer["Store successfully updated"].Value;
         }
 
         return RedirectToAction(nameof(GeneralSettings), new
@@ -187,8 +188,8 @@ public partial class UIStoresController
         await _storeRepo.UpdateStore(CurrentStore);
 
         TempData[WellKnownTempData.SuccessMessage] = CurrentStore.Archived
-            ? "The store has been archived and will no longer appear in the stores list by default."
-            : "The store has been unarchived and will appear in the stores list by default again.";
+            ? StringLocalizer["The store has been archived and will no longer appear in the stores list by default."].Value
+            : StringLocalizer["The store has been unarchived and will appear in the stores list by default again."].Value;
 
         return RedirectToAction(nameof(GeneralSettings), new
         {
@@ -208,7 +209,7 @@ public partial class UIStoresController
     public async Task<IActionResult> DeleteStorePost(string storeId)
     {
         await _storeRepo.DeleteStore(CurrentStore.Id);
-        TempData[WellKnownTempData.SuccessMessage] = "Store successfully deleted.";
+        TempData[WellKnownTempData.SuccessMessage] = StringLocalizer["Store successfully deleted."].Value;
         return RedirectToAction(nameof(UIHomeController.Index), "UIHome");
     }
 
@@ -239,17 +240,21 @@ public partial class UIStoresController
 
         vm.CelebratePayment = storeBlob.CelebratePayment;
         vm.PlaySoundOnPayment = storeBlob.PlaySoundOnPayment;
+        vm.NfcEnabled = storeBlob.NfcEnabled;
         vm.OnChainWithLnInvoiceFallback = storeBlob.OnChainWithLnInvoiceFallback;
         vm.ShowPayInWalletButton = storeBlob.ShowPayInWalletButton;
         vm.ShowStoreHeader = storeBlob.ShowStoreHeader;
         vm.LightningAmountInSatoshi = storeBlob.LightningAmountInSatoshi;
         vm.LazyPaymentMethods = storeBlob.LazyPaymentMethods;
+        vm.AllowZeroAmountInvoices = storeBlob.AllowZeroAmountInvoices;
         vm.RedirectAutomatically = storeBlob.RedirectAutomatically;
         vm.PaymentSoundUrl = storeBlob.PaymentSoundUrl is null
             ? string.Concat(Request.GetAbsoluteRootUri().ToString(), "checkout/payment.mp3")
             : await _uriResolver.Resolve(Request.GetAbsoluteRootUri(), storeBlob.PaymentSoundUrl);
         vm.HtmlTitle = storeBlob.HtmlTitle;
-        vm.SupportUrl = storeBlob.StoreSupportUrl;
+        vm.SupportUrl = storeBlob.StoreSupportUrl?.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) is true
+            ? storeBlob.StoreSupportUrl["mailto:".Length..] : storeBlob.StoreSupportUrl;
+        vm.CheckoutText = storeBlob.CheckoutText;
         vm.DisplayExpirationTimer = (int)storeBlob.DisplayExpirationTimer.TotalMinutes;
         vm.ReceiptOptions = CheckoutAppearanceViewModel.ReceiptOptionsViewModel.Create(storeBlob.ReceiptOptions);
         vm.AutoDetectLanguage = storeBlob.AutoDetectLanguage;
@@ -330,6 +335,16 @@ public partial class UIStoresController
             needUpdate = true;
         }
 
+        var supportUrl = model.SupportUrl?.Trim();
+        if (string.IsNullOrEmpty(supportUrl))
+            blob.StoreSupportUrl = null;
+        else if (supportUrl.IsValidEmail())
+            blob.StoreSupportUrl = $"mailto:{supportUrl}";
+        else if (Uri.TryCreate(supportUrl, UriKind.Absolute, out var supportUri) && supportUri.Scheme is "http" or "https")
+            blob.StoreSupportUrl = supportUrl;
+        else
+            ModelState.AddModelError(nameof(model.SupportUrl), "Support URL is not a valid url");
+
         if (!ModelState.IsValid)
         {
             return View(model);
@@ -375,13 +390,15 @@ public partial class UIStoresController
         blob.ShowStoreHeader = model.ShowStoreHeader;
         blob.CelebratePayment = model.CelebratePayment;
         blob.PlaySoundOnPayment = model.PlaySoundOnPayment;
+        blob.NfcEnabled = model.NfcEnabled;
         blob.OnChainWithLnInvoiceFallback = model.OnChainWithLnInvoiceFallback;
         blob.LightningAmountInSatoshi = model.LightningAmountInSatoshi;
         blob.LazyPaymentMethods = model.LazyPaymentMethods;
+        blob.AllowZeroAmountInvoices = model.AllowZeroAmountInvoices;
         blob.RedirectAutomatically = model.RedirectAutomatically;
         blob.ReceiptOptions = model.ReceiptOptions.ToDTO();
         blob.HtmlTitle = string.IsNullOrWhiteSpace(model.HtmlTitle) ? null : model.HtmlTitle;
-        blob.StoreSupportUrl = string.IsNullOrWhiteSpace(model.SupportUrl) ? null : model.SupportUrl.IsValidEmail() ? $"mailto:{model.SupportUrl}" : model.SupportUrl;
+        blob.CheckoutText = string.IsNullOrWhiteSpace(model.CheckoutText) ? null : model.CheckoutText;
         blob.DisplayExpirationTimer = TimeSpan.FromMinutes(model.DisplayExpirationTimer);
         blob.AutoDetectLanguage = model.AutoDetectLanguage;
         blob.DefaultLang = model.DefaultLang;
@@ -392,7 +409,7 @@ public partial class UIStoresController
         if (needUpdate)
         {
             await _storeRepo.UpdateStore(CurrentStore);
-            TempData[WellKnownTempData.SuccessMessage] = "Store successfully updated";
+            TempData[WellKnownTempData.SuccessMessage] = StringLocalizer["Store successfully updated"].Value;
         }
 
         return RedirectToAction(nameof(CheckoutAppearance), new
@@ -417,8 +434,8 @@ public partial class UIStoresController
         var defaultChoice = defaultPaymentId?.FindNearest(enabled);
         if (defaultChoice is null)
         {
-            defaultChoice = enabled.FirstOrDefault(e => e == PaymentTypes.CHAIN.GetPaymentMethodId(_networkProvider.DefaultNetwork.CryptoCode)) ??
-                            enabled.FirstOrDefault(e => e == PaymentTypes.LN.GetPaymentMethodId(_networkProvider.DefaultNetwork.CryptoCode)) ??
+            defaultChoice = enabled.FirstOrDefault(e => e == PaymentTypes.CHAIN.GetPaymentMethodId(_networkProvider.DefaultCryptoCode)) ??
+                            enabled.FirstOrDefault(e => e == PaymentTypes.LN.GetPaymentMethodId(_networkProvider.DefaultCryptoCode)) ??
                             enabled.FirstOrDefault();
         }
         var choices = GetEnabledPaymentMethodChoices(storeData);

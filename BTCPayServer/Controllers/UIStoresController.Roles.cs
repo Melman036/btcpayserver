@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -61,7 +62,7 @@ public partial class UIStoresController
             return NotFound();
         return View(new UpdateRoleViewModel
         {
-            Policies = roleData.Permissions,
+            Permissions = roleData.Permissions.ToHashSet(),
             Role = roleData.Role
         });
     }
@@ -95,7 +96,7 @@ public partial class UIStoresController
             return View(viewModel);
         }
 
-        var r = await storeRepository.AddOrUpdateStoreRole(roleId, viewModel.Policies);
+        var r = await storeRepository.AddOrUpdateStoreRole(roleId, viewModel.Permissions);
         if (r is null)
         {
             TempData.SetStatusMessageModel(new StatusMessageModel
@@ -122,10 +123,10 @@ public partial class UIStoresController
         [FromServices] StoreRepository storeRepository,
         string role)
     {
-        var roleId = await storeRepository.ResolveStoreRoleId(storeId, role);
-        if (roleId == null)
+        if (string.IsNullOrWhiteSpace(role) || role.Contains("::", StringComparison.Ordinal))
             return NotFound();
-            
+        var roleId = new StoreRoleId(storeId, role);
+
         var roleData = await storeRepository.GetStoreRole(roleId, true);
         if (roleData == null)
             return NotFound();
@@ -146,10 +147,10 @@ public partial class UIStoresController
         [FromServices] StoreRepository storeRepository,
         string role)
     {
-        var roleId = await storeRepository.ResolveStoreRoleId(storeId, role);
-        if (roleId == null)
+        if (string.IsNullOrWhiteSpace(role) || role.Contains("::", StringComparison.Ordinal))
             return NotFound();
-            
+        var roleId = new StoreRoleId(storeId, role);
+
         var roleData = await storeRepository.GetStoreRole(roleId, true);
         if (roleData == null)
             return NotFound();

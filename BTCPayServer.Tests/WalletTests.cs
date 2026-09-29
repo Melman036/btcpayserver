@@ -1,10 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Web;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Payments;
 using BTCPayServer.Services.Invoices;
@@ -16,7 +18,7 @@ using NBitcoin;
 using NBitcoin.Payment;
 using NBXplorer.Models;
 using Xunit;
-using Xunit.Abstractions;
+using static Microsoft.Playwright.Assertions;
 
 namespace BTCPayServer.Tests;
 
@@ -30,7 +32,7 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         await s.StartAsync();
         await s.RegisterNewUser(true);
         (_, string storeId) = await s.CreateNewStore();
-        await s.GenerateWallet("BTC", "", false, true);
+        await s.GenerateWallet("BTC", "", false);
         var walletId = new WalletId(storeId, "BTC");
 
         await s.GoToWallet(walletId, WalletsNavPages.Receive);
@@ -152,6 +154,41 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
 
     [Fact]
     [Trait("Playwright", "Playwright-2")]
+    public async Task CanAddLabelsOnWalletSendPage()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToUrl($"wallets/{s.WalletId}/send");
+
+        // Regression: app-relative URLs must be resolved by the UrlResolutionTagHelper,
+        // otherwise tom-select 404s and the label manager never initializes
+        var content = await s.Page.ContentAsync();
+        Assert.DoesNotContain("src=\"~/", content);
+        Assert.DoesNotContain("href=\"~/", content);
+
+        // The label manager is initialized by tom-select
+        await s.Page.WaitForSelectorAsync("input.label-manager.tomselected");
+        var hasTomSelect = await s.Page.EvaluateAsync<bool>(
+            "() => !!document.querySelector('input.label-manager').tomselect");
+        Assert.True(hasTomSelect, "TomSelect was not initialized on the label manager");
+
+        // Can add a label?
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            await s.Page.ClickAsync("div.label-manager input");
+            await s.Page.FillAsync("div.label-manager input", "send-label");
+            await s.Page.Keyboard.PressAsync("Enter");
+            await s.Page.WaitForSelectorAsync("[data-value='send-label']");
+        });
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
     public async Task CanManageWallet()
     {
         await using var s = CreatePlaywrightTester();
@@ -163,9 +200,9 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         // ReSharper disable once GrammarMistakeInComment
         // In this test, we try to spend from a manual seed. We import the xpub 49'/0'/0',
         // then try to use the seed to sign the transaction
-        await s.GenerateWallet(cryptoCode, "", true);
+        await s.GenerateWallet();
 
-        //let's test quickly the wallet send page
+        //let's quickly test the wallet send page
         await s.GoToWallet(navPages: WalletsNavPages.Send);
         //you cannot use the Sign with NBX option without saving private keys when generating the wallet.
         Assert.DoesNotContain("nbx-seed", await s.Page.ContentAsync());
@@ -241,7 +278,7 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         await wt.AssertHasLabels("label2");
 
         //change the wallet and ensure old address is not there and generating a new one does not result in the prev one
-        await s.GenerateWallet(cryptoCode, "", true);
+        await s.GenerateWallet(isHotWallet: true);
         await s.GoToWallet(null, WalletsNavPages.Receive);
         await s.Page.ClickAsync("button[value=generate-new-address]");
         var newAddr = await s.Page.Locator("#Address").GetAttributeAsync("data-text");
@@ -252,12 +289,12 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         var btc = PaymentTypes.CHAIN.GetPaymentMethodId("BTC");
         var address = invoice.GetPaymentPrompt(btc)!.Destination;
 
-        //wallet should have been imported to bitcoin core wallet in watch only mode.
+        // wallet should have been imported to bitcoin core wallet
         var result =
             await s.Server.ExplorerNode.GetAddressInfoAsync(BitcoinAddress.Create(address, Network.RegTest));
-        Assert.True(result.IsWatchOnly);
+        Assert.False(result.IsWatchOnly);
         await s.GoToStore(storeId);
-        var mnemonic = await s.GenerateWallet(cryptoCode, "", true, true);
+        var mnemonic = await s.GenerateWallet(cryptoCode, "", true);
 
         //let's import and save private keys
         invoiceId = await s.CreateInvoice(storeId);
@@ -313,10 +350,10 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         });
 
         await ws.Sign();
-        // Back button should lead back to the previous page inside the send wizard
+        // The back button should lead back to the previous page inside the send wizard
         var backUrl = await s.Page.Locator("#GoBack").GetAttributeAsync("href");
         Assert.EndsWith($"/send?returnUrl={Uri.EscapeDataString(walletTransactionUri.AbsolutePath)}", backUrl);
-        // Cancel button should lead to the page that referred to the send wizard
+        // The cancel button should lead to the page that referred to the send wizard
         var cancelUrl = await s.Page.Locator("#CancelWizard").GetAttributeAsync("href");
         Assert.EndsWith(walletTransactionUri.AbsolutePath, cancelUrl);
 
@@ -403,8 +440,10 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         await using (_ = await s.SwitchPage(opening))
         {
             await s.Page.WaitForLoadStateAsync();
+            var exportUri = new Uri(s.Page.Url);
             Assert.Contains(s.WalletId.ToString(), s.Page.Url);
-            Assert.EndsWith("export?format=json", s.Page.Url);
+            Assert.EndsWith("/export", exportUri.AbsolutePath);
+            Assert.Contains("format=json", exportUri.Query);
             Assert.Contains("\"Amount\": \"3.00000000\"", await s.Page.ContentAsync());
         }
 
@@ -514,6 +553,89 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
 
     [Fact]
     [Trait("Playwright", "Playwright-2")]
+    public async Task CanHideReservedAddressesFromReplacedWallet()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        var walletId = new WalletId(s.StoreId, "BTC");
+        s.WalletId = walletId;
+        var originalMnemonic = (await s.GenerateWallet()).ToString();
+
+        await s.GoToWallet(walletId, WalletsNavPages.Receive);
+
+        List<string> oldAddresses = [];
+        var currentAddress = await s.Page.GetAttributeAsync("#Address", "data-text") ?? string.Empty;
+        Assert.False(string.IsNullOrEmpty(currentAddress));
+        oldAddresses.Add(currentAddress);
+
+        for (var i = 0; i < 2; i++)
+        {
+            await s.Page.ClickAsync("button[value=generate-new-address]");
+            await TestUtils.EventuallyAsync(async () =>
+            {
+                var newAddress = await s.Page.GetAttributeAsync("#Address[data-text]", "data-text");
+                Assert.False(string.IsNullOrEmpty(newAddress));
+                Assert.NotEqual(currentAddress, newAddress);
+            });
+
+            currentAddress = await s.Page.GetAttributeAsync("#Address", "data-text") ?? string.Empty;
+            Assert.False(string.IsNullOrEmpty(currentAddress));
+            oldAddresses.Add(currentAddress);
+        }
+
+        await s.Page.ClickAsync("#reserved-addresses-button");
+        await s.Page.WaitForSelectorAsync("#reserved-addresses");
+        const string labelInputSelector = "#reserved-addresses table tbody tr .ts-control input";
+        await s.Page.WaitForSelectorAsync(labelInputSelector);
+        await s.Page.FillAsync(labelInputSelector, "old-wallet-label");
+        await s.Page.Keyboard.PressAsync("Enter");
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            var text = await s.Page.InnerTextAsync("#reserved-addresses table tbody");
+            Assert.Contains("old-wallet-label", text);
+        });
+        var oldReservedAddressesPage = await s.Page.ContentAsync();
+        foreach (var oldAddress in oldAddresses)
+        {
+            Assert.Contains(oldAddress, oldReservedAddressesPage);
+        }
+
+        await s.GenerateWallet(seed: "melody lizard phrase voice unique car opinion merge degree evil swift cargo");
+        await s.GoToWallet(walletId, WalletsNavPages.Receive);
+
+        var newAddress = await s.Page.GetAttributeAsync("#Address", "data-text") ?? string.Empty;
+        Assert.False(string.IsNullOrEmpty(newAddress));
+        Assert.DoesNotContain(newAddress, oldAddresses);
+
+        await s.Page.ClickAsync("#reserved-addresses-button");
+        await s.Page.WaitForSelectorAsync("#reserved-addresses");
+
+        var replacedWalletReservedAddressesPage = await s.Page.ContentAsync();
+        Assert.Contains(newAddress, replacedWalletReservedAddressesPage);
+        Assert.DoesNotContain("old-wallet-label", replacedWalletReservedAddressesPage);
+        foreach (var oldAddress in oldAddresses)
+        {
+            Assert.DoesNotContain(oldAddress, replacedWalletReservedAddressesPage);
+        }
+
+        await s.GenerateWallet(seed: originalMnemonic);
+        await s.GoToWallet(walletId, WalletsNavPages.Receive);
+        await s.Page.ClickAsync("#reserved-addresses-button");
+        await s.Page.WaitForSelectorAsync("#reserved-addresses");
+
+        var restoredWalletReservedAddressesPage = await s.Page.ContentAsync();
+        Assert.DoesNotContain(newAddress, restoredWalletReservedAddressesPage);
+        Assert.Contains("old-wallet-label", restoredWalletReservedAddressesPage);
+        foreach (var oldAddress in oldAddresses)
+        {
+            Assert.Contains(oldAddress, restoredWalletReservedAddressesPage);
+        }
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
     public async Task CanUseBumpFee()
     {
         await using var s = CreatePlaywrightTester();
@@ -605,6 +727,631 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         await w.AssertHasLabels("RBF");
     }
 
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanSearchLabelFilterInWalletTransactions()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        const int txCount = 22;
+        const int distinctLabelCount = 21;
+        for (var i = 0; i < txCount; i++)
+        {
+            await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.001m + i * 0.0001m));
+        }
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            var txs = await client.ShowOnChainWalletTransactions(s.StoreId, "BTC");
+            Assert.True(txs.Count() >= txCount);
+        });
+
+        const string targetLabel = "zz-smoke-popular-target";
+        var labels = Enumerable.Range(0, distinctLabelCount - 1)
+            .Select(i => $"smoke-alpha-{i:00}")
+            .ToArray();
+        var transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(txCount).ToArray();
+        for (var i = 0; i < transactions.Length; i++)
+        {
+            var label = i < 2 ? targetLabel : labels[i - 2];
+            await client.PatchOnChainWalletTransaction(
+                s.StoreId,
+                "BTC",
+                transactions[i].TransactionHash.ToString(),
+                new PatchOnChainTransactionRequest
+                {
+                    Labels = new List<string> { label }
+                });
+        }
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.LabelSelectorToggle.ClickAsync();
+        await s.Page.Locator("#LabelSelectorMenu").WaitForAsync();
+        await s.Page.Locator("#LabelSearch").WaitForAsync();
+
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            Assert.Equal(20, await s.Page.Locator("#LabelSelectorMenu .label-filter-item").CountAsync());
+            Assert.True(await s.Page.Locator($"#LabelSelectorMenu .label-filter-item span:has-text('{targetLabel}')").IsVisibleAsync());
+
+            var targetItem = s.Page
+                .Locator("#LabelSelectorMenu .label-filter-item")
+                .Filter(new() { Has = s.Page.Locator($".label-filter-text:text-is('{targetLabel}')") });
+            Assert.Equal("2", (await targetItem.Locator(".label-filter-count").InnerTextAsync()).Trim());
+
+            var singleUseLabel = labels[0];
+            var singleUseItem = s.Page
+                .Locator("#LabelSelectorMenu .label-filter-item")
+                .Filter(new() { Has = s.Page.Locator($".label-filter-text:text-is('{singleUseLabel}')") });
+            Assert.Equal("1", (await singleUseItem.Locator(".label-filter-count").InnerTextAsync()).Trim());
+        });
+
+        await s.Page.FillAsync("#LabelSearch", "target");
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            var items = await s.Page.Locator("#LabelSelectorMenu .label-filter-item").CountAsync();
+            Assert.Equal(1, items);
+            Assert.Equal("2", (await s.Page.Locator("#LabelSelectorMenu .label-filter-item .label-filter-count").InnerTextAsync()).Trim());
+        });
+
+        await s.Page.ClickAsync($"#LabelSelectorMenu .label-filter-item span:has-text('{targetLabel}')");
+        await TestUtils.EventuallyAsync(() =>
+        {
+            Assert.Contains($"label:{targetLabel}", Uri.UnescapeDataString(s.Page.Url));
+            return Task.CompletedTask;
+        });
+
+        await s.InWalletTransactions().AssertHasLabels(targetLabel);
+
+        // Import BIP-329 labels from the transactions page toolbar (#6663)
+        var walletId = new WalletId(s.StoreId, "BTC");
+        const string toolbarLabel = "bip329-toolbar";
+        var toolbarTxId = transactions[1].TransactionHash.ToString();
+        var toolbarFile = Path.Combine(Path.GetTempPath(), $"bip329-{Guid.NewGuid():N}.jsonl");
+        await File.WriteAllTextAsync(toolbarFile, $"{{\"type\":\"tx\",\"ref\":\"{toolbarTxId}\",\"label\":\"{toolbarLabel}\"}}\n");
+        await s.Page.SetInputFilesAsync("#Dropdowns .wallet-labels__import-file", toolbarFile);
+        await s.Page.WaitForURLAsync(s.ServerUri + $"wallets/{walletId}/labels");
+        await s.FindAlertMessage(partialText: "Imported 1 label(s).");
+        var toolbarTx = await client.GetOnChainWalletTransaction(s.StoreId, "BTC", toolbarTxId);
+        Assert.Contains(toolbarLabel, toolbarTx.Labels.Keys);
+
+        await s.GoToWalletTransactions(s.WalletId);
+        // The label dropdown exposes a "Manage Labels" link that navigates to the wallet labels page (#7252)
+        await s.SearchFilters.LabelSelectorToggle.ClickAsync();
+        await s.Page.ClickAsync("#LabelSelectorMenu a:has-text('Manage Labels')");
+        await s.Page.WaitForURLAsync(s.ServerUri + $"wallets/{walletId}/labels");
+
+        // Import BIP-329 labels from the wallet labels page (#6663)
+        const string importedLabel = "bip329-imported";
+        var importedTxId = transactions[0].TransactionHash.ToString();
+        var importFile = Path.Combine(Path.GetTempPath(), $"bip329-{Guid.NewGuid():N}.jsonl");
+        await File.WriteAllTextAsync(importFile,
+            $"{{\"type\":\"tx\",\"ref\":\"{importedTxId}\",\"label\":\"{importedLabel}\"}}\n" +
+            "not json\n");
+        await s.Page.SetInputFilesAsync(".wallet-labels__import-file", importFile);
+        await s.Page.ClickAsync(".wallet-labels__import-button");
+        await s.FindAlertMessage(partialText: "Imported 1 label(s), skipped 1 line(s).");
+        Assert.True(await s.Page.Locator($".transaction-label:has-text('{importedLabel}')").IsVisibleAsync());
+        var importedTx = await client.GetOnChainWalletTransaction(s.StoreId, "BTC", importedTxId);
+        Assert.Contains(importedLabel, importedTx.Labels.Keys);
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanPreserveSearchTextWhenApplyingWalletLabelFilter()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.001m));
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.002m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var transactions = Array.Empty<OnChainWalletTransactionData>();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(2).ToArray();
+            Assert.Equal(2, transactions.Length);
+        });
+
+        const string targetLabel = "preserve-search-label";
+        const string otherLabel = "different-wallet-label";
+        var targetSearchText = transactions[0].TransactionHash.ToString()[..12];
+
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            transactions[0].TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            transactions[1].TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { otherLabel }
+            });
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.FillSearchText(targetSearchText);
+
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            await s.SearchFilters.AssertSearchText(targetSearchText);
+
+            var urlAfterSearch = new Uri(s.Page.Url);
+            var qsAfterSearch = HttpUtility.ParseQueryString(urlAfterSearch.Query);
+            Assert.Equal(targetSearchText, qsAfterSearch["SearchText"]);
+            Assert.True(string.IsNullOrEmpty(qsAfterSearch["SearchTerm"]));
+        });
+
+        await s.SearchFilters.SelectLabel(targetLabel);
+
+        await s.SearchFilters.AssertSearchText(targetSearchText);
+        Assert.Contains($"label:{targetLabel}", await s.SearchFilters.SearchTermValue());
+        await Expect(s.SearchFilters.LabelSelectorToggle).ToContainTextAsync(targetLabel);
+
+        var urlAfterLabelFilter = new Uri(s.Page.Url);
+        var qsAfterLabelFilter = HttpUtility.ParseQueryString(urlAfterLabelFilter.Query);
+        Assert.Equal(targetSearchText, qsAfterLabelFilter["SearchText"]);
+        Assert.Contains($"label:{targetLabel}", Uri.UnescapeDataString(qsAfterLabelFilter["SearchTerm"] ?? string.Empty));
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanPreserveSearchTextWhenApplyingWalletDatePresetFilter()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.001m));
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.002m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var transactions = Array.Empty<OnChainWalletTransactionData>();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(2).ToArray();
+            Assert.Equal(2, transactions.Length);
+        });
+
+        var targetSearchText = transactions[0].TransactionHash.ToString()[..12];
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.FillSearchText(targetSearchText);
+
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            await s.SearchFilters.AssertSearchText(targetSearchText);
+
+            var urlAfterSearch = new Uri(s.Page.Url);
+            var qsAfterSearch = HttpUtility.ParseQueryString(urlAfterSearch.Query);
+            Assert.Equal(targetSearchText, qsAfterSearch["SearchText"]);
+            Assert.True(string.IsNullOrEmpty(qsAfterSearch["SearchTerm"]));
+        });
+
+        await s.SearchFilters.SelectDateRangePreset("This month");
+
+        await s.SearchFilters.AssertSearchText(targetSearchText);
+        await Expect(s.SearchFilters.DateRangeSelector).ToHaveTextAsync("This month");
+
+        Assert.Contains("daterange:thismonth", await s.SearchFilters.SearchTermValue());
+
+        var urlAfterPreset = new Uri(s.Page.Url);
+        var qsAfterPreset = HttpUtility.ParseQueryString(urlAfterPreset.Query);
+        Assert.Equal(targetSearchText, qsAfterPreset["SearchText"]);
+        Assert.Contains("daterange:thismonth", Uri.UnescapeDataString(qsAfterPreset["SearchTerm"] ?? string.Empty));
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanFilterWalletTransactionsByNoLabel()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.001m));
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(0.002m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var transactions = Array.Empty<OnChainWalletTransactionData>();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(2).ToArray();
+            Assert.Equal(2, transactions.Length);
+        });
+
+        var labeledTx = transactions[0];
+        var unlabeledTx = transactions[1];
+        const string targetLabel = "no-label-excluded";
+
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            labeledTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.SelectNoLabel();
+
+        await Expect(s.SearchFilters.LabelSelectorToggle).ToContainTextAsync("No Label");
+        Assert.Contains("nolabel:true", await s.SearchFilters.SearchTermValue());
+
+        var urlAfterNoLabelFilter = new Uri(s.Page.Url);
+        var qsAfterNoLabelFilter = HttpUtility.ParseQueryString(urlAfterNoLabelFilter.Query);
+        Assert.Contains("nolabel:true", Uri.UnescapeDataString(qsAfterNoLabelFilter["SearchTerm"] ?? string.Empty));
+
+        await Expect(s.Page.Locator($".transaction-row[data-value='{unlabeledTx.TransactionHash}']")).ToBeVisibleAsync();
+        await Expect(s.Page.Locator($".transaction-row[data-value='{labeledTx.TransactionHash}']")).ToBeHiddenAsync();
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanCombineWalletDirectionAndLabelFilters()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(1.0m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var nodeAddress = await s.Server.ExplorerNode.GetNewAddressAsync();
+        var outgoingTx = await client.CreateOnChainTransaction(s.StoreId, "BTC", new CreateOnChainTransactionRequest
+        {
+            Destinations =
+            [
+                new CreateOnChainTransactionRequest.CreateOnChainTransactionRequestDestination
+                {
+                    Destination = nodeAddress.ToString(),
+                    Amount = 0.1m
+                }
+            ],
+            FeeRate = new FeeRate(5m)
+        });
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var transactions = Array.Empty<OnChainWalletTransactionData>();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(2).ToArray();
+            Assert.Contains(transactions, tx => tx.TransactionHash == outgoingTx.TransactionHash);
+        });
+
+        var incomingTx = transactions.Single(tx => tx.TransactionHash != outgoingTx.TransactionHash);
+        const string targetLabel = "combined-wallet-filter-target";
+
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            incomingTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            outgoingTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await SelectWalletDirection(s, "Outgoing");
+        await s.SearchFilters.SelectLabel(targetLabel);
+        await s.Page.WaitForLoadStateAsync();
+
+        await AssertDirectionToggle(s, "Outgoing");
+        await Expect(s.SearchFilters.LabelSelectorToggle).ToContainTextAsync(targetLabel);
+
+        var hiddenSearchTerm = await s.SearchFilters.SearchTermValue();
+        Assert.Contains("direction:out", hiddenSearchTerm);
+        Assert.Contains($"label:{targetLabel}", hiddenSearchTerm);
+
+        var urlAfterCombinedFilter = new Uri(s.Page.Url);
+        var qsAfterCombinedFilter = HttpUtility.ParseQueryString(urlAfterCombinedFilter.Query);
+        var searchTerm = Uri.UnescapeDataString(qsAfterCombinedFilter["SearchTerm"] ?? string.Empty);
+        Assert.Contains("direction:out", searchTerm);
+        Assert.Contains($"label:{targetLabel}", searchTerm);
+
+        await Expect(s.Page.Locator($".transaction-row[data-value='{outgoingTx.TransactionHash}']")).ToBeVisibleAsync();
+        await Expect(s.Page.Locator($".transaction-row[data-value='{incomingTx.TransactionHash}']")).ToBeHiddenAsync();
+        await Expect(s.Page.Locator(".transaction-row")).ToHaveCountAsync(1);
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanFilterWalletTransactionsByDirectionWithoutPollutingSearchText()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(1.0m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var nodeAddress = await s.Server.ExplorerNode.GetNewAddressAsync();
+        await client.CreateOnChainTransaction(s.StoreId, "BTC", new CreateOnChainTransactionRequest
+        {
+            Destinations =
+            [
+                new CreateOnChainTransactionRequest.CreateOnChainTransactionRequestDestination
+                {
+                    Destination = nodeAddress.ToString(),
+                    Amount = 0.1m
+                }
+            ],
+            FeeRate = new FeeRate(5m)
+        });
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            Assert.True((await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Count() >= 2);
+        });
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.AssertSearchText(string.Empty);
+
+        await SelectWalletDirection(s, "Outgoing");
+
+        await AssertDirectionToggle(s, "Outgoing");
+        Assert.Contains("direction:out", await s.SearchFilters.SearchTermValue());
+        await s.SearchFilters.AssertSearchText(string.Empty);
+        await Expect(s.Page.Locator(".transaction-row .amount-col .text-danger").First).ToBeVisibleAsync();
+        await Expect(s.Page.Locator(".transaction-row .amount-col .text-success")).ToHaveCountAsync(0);
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanClearAllWalletTransactionFiltersAndSearchText()
+    {
+        await using var s = CreatePlaywrightTester();
+
+        async Task AssertDateRangeTimeZone(string timeZone)
+        {
+            await s.SearchFilters.OpenDateRange();
+            await Expect(s.SearchFilters.DateRangeTimeZone).ToHaveValueAsync(timeZone);
+        }
+
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(1.0m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var nodeAddress = await s.Server.ExplorerNode.GetNewAddressAsync();
+        var outgoingTx = await client.CreateOnChainTransaction(s.StoreId, "BTC", new CreateOnChainTransactionRequest
+        {
+            Destinations =
+            [
+                new CreateOnChainTransactionRequest.CreateOnChainTransactionRequestDestination
+                {
+                    Destination = nodeAddress.ToString(),
+                    Amount = 0.1m
+                }
+            ],
+            FeeRate = new FeeRate(5m)
+        });
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            Assert.True((await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Count() >= 2);
+        });
+
+        const string targetLabel = "clear-all-target";
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            outgoingTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+
+        await s.GoToWalletTransactions(s.WalletId);
+
+        await s.SearchFilters.OpenDateRange();
+        var browserTimeZone = await s.Page.EvaluateAsync<string>("() => Intl.DateTimeFormat().resolvedOptions().timeZone");
+        await Expect(s.SearchFilters.DateRangeTimeZone).ToHaveValueAsync(browserTimeZone + " (Default)");
+        await s.SearchFilters.DateRangeTimeZone.ClickAsync();
+        await Expect(s.SearchFilters.DateRangeTimeZone).ToHaveValueAsync(string.Empty);
+        await Expect(s.SearchFilters.DateRangeTimeZone).ToHaveAttributeAsync("placeholder", browserTimeZone + " (Default)");
+        await s.SearchFilters.DateRangeTimeZone.PressAsync("Tab");
+        await Expect(s.SearchFilters.DateRangeTimeZone).ToHaveValueAsync(browserTimeZone + " (Default)");
+
+        const string selectedTimeZone = "America/New_York";
+        await s.SearchFilters.SelectTimeZone(selectedTimeZone);
+        await AssertDateRangeTimeZone(selectedTimeZone);
+
+        await s.SearchFilters.FillSearchText(targetLabel);
+        await SelectWalletDirection(s, "Outgoing");
+
+        await s.SearchFilters.AssertSearchText(targetLabel);
+        var searchTermWithFilters = await s.SearchFilters.SearchTermValue();
+        Assert.Contains("direction:out", searchTermWithFilters);
+        Assert.Contains($"timezone:{selectedTimeZone}", searchTermWithFilters);
+        await AssertDirectionToggle(s, "Outgoing");
+        await Expect(s.Page.Locator(".transaction-row")).ToHaveCountAsync(1);
+        await Expect(s.SearchFilters.ClearAllFiltersButton).ToHaveCountAsync(1);
+
+        await s.SearchFilters.ClearAllFilters();
+
+        await s.SearchFilters.AssertSearchText(string.Empty);
+        await Expect(s.SearchFilters.SearchTerm).ToHaveValueAsync($"timezone:{selectedTimeZone}");
+        await AssertDateRangeTimeZone(selectedTimeZone);
+        await AssertDirectionToggle(s, "All Directions");
+        await Expect(s.SearchFilters.ClearAllFiltersButton).ToHaveCountAsync(0);
+        Assert.True(await s.Page.Locator(".transaction-row").CountAsync() >= 2);
+        await Expect(s.Page.Locator(".transaction-row .amount-col .text-danger").First).ToBeVisibleAsync();
+        await Expect(s.Page.Locator(".transaction-row .amount-col .text-success").First).ToBeVisibleAsync();
+
+        var urlAfterClearAll = new Uri(s.Page.Url);
+        var qsAfterClearAll = HttpUtility.ParseQueryString(urlAfterClearAll.Query);
+        Assert.True(string.IsNullOrEmpty(qsAfterClearAll["SearchText"]));
+        Assert.Equal($"timezone:{selectedTimeZone}", qsAfterClearAll["SearchTerm"]);
+
+        await s.GoToInvoices(s.StoreId);
+        await AssertDateRangeTimeZone(selectedTimeZone);
+    }
+
+    [Fact]
+    [Trait("Playwright", "Playwright-2")]
+    public async Task CanPreserveWalletFiltersInExportLinks()
+    {
+        await using var s = CreatePlaywrightTester();
+        await s.StartAsync();
+        await s.Server.ExplorerNode.GenerateAsync(1);
+        await s.RegisterNewUser(true);
+        await s.CreateNewStore();
+        await s.GenerateWallet(isHotWallet: true);
+
+        await s.GoToWallet(s.WalletId, WalletsNavPages.Receive);
+        var addressStr = await s.Page.GetAttributeAsync("#Address", "data-text");
+        var address = BitcoinAddress.Create(addressStr!, ((BTCPayNetwork)s.Server.NetworkProvider.GetNetwork("BTC")).NBitcoinNetwork);
+
+        await s.Server.ExplorerNode.SendToAddressAsync(address, Money.Coins(1.0m));
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var client = await s.AsTestAccount().CreateClient();
+        var nodeAddress = await s.Server.ExplorerNode.GetNewAddressAsync();
+        var outgoingTx = await client.CreateOnChainTransaction(s.StoreId, "BTC", new CreateOnChainTransactionRequest
+        {
+            Destinations =
+            [
+                new CreateOnChainTransactionRequest.CreateOnChainTransactionRequestDestination
+                {
+                    Destination = nodeAddress.ToString(),
+                    Amount = 0.1m
+                }
+            ],
+            FeeRate = new FeeRate(5m)
+        });
+        await s.Server.ExplorerNode.GenerateAsync(1);
+
+        var transactions = Array.Empty<OnChainWalletTransactionData>();
+        await TestUtils.EventuallyAsync(async () =>
+        {
+            transactions = (await client.ShowOnChainWalletTransactions(s.StoreId, "BTC")).Take(2).ToArray();
+            Assert.Contains(transactions, tx => tx.TransactionHash == outgoingTx.TransactionHash);
+        });
+
+        var incomingTx = transactions.Single(tx => tx.TransactionHash != outgoingTx.TransactionHash);
+        const string targetLabel = "export-wallet-filter-target";
+        const string otherLabel = "export-wallet-filter-other";
+        var targetSearchText = outgoingTx.TransactionHash.ToString()[..12];
+
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            outgoingTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { targetLabel }
+            });
+        await client.PatchOnChainWalletTransaction(
+            s.StoreId,
+            "BTC",
+            incomingTx.TransactionHash.ToString(),
+            new PatchOnChainTransactionRequest
+            {
+                Labels = new List<string> { otherLabel }
+            });
+
+        await s.GoToWalletTransactions(s.WalletId);
+        await s.SearchFilters.FillSearchText(targetSearchText);
+
+        await SelectWalletDirection(s, "Outgoing");
+
+        await s.SearchFilters.SelectLabel(targetLabel);
+
+        await s.SearchFilters.SelectCustomStartDate("2026-03-01T12:34:56");
+
+        await s.SearchFilters.AssertSearchText(targetSearchText);
+
+        var hiddenSearchTerm = await s.SearchFilters.SearchTermValue();
+        Assert.Contains("direction:out", hiddenSearchTerm);
+        Assert.Contains($"label:{targetLabel}", hiddenSearchTerm);
+        Assert.Contains("startdate:2026-03-01T12:34:56", hiddenSearchTerm);
+
+        await Expect(s.Page.Locator("#Export input[name='searchText']")).ToHaveValueAsync(targetSearchText);
+        var exportSearchTerm = await s.Page.InputValueAsync("#Export input[name='searchTerm']");
+        Assert.Contains("direction:out", exportSearchTerm);
+        Assert.Contains($"label:{targetLabel}", exportSearchTerm);
+        Assert.Contains("startdate:2026-03-01T12:34:56", exportSearchTerm);
+        Assert.DoesNotContain(otherLabel, exportSearchTerm);
+    }
+
     private async Task CreateInvoices(PlaywrightTester tester)
     {
         var client = await tester.AsTestAccount().CreateClient();
@@ -618,6 +1365,15 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         }
     }
 
+    private static Task AssertDirectionToggle(PlaywrightTester tester, string text) =>
+        Expect(tester.Page.Locator(".wallet-transactions__direction-toggle")).ToContainTextAsync(text);
+
+    private static async Task SelectWalletDirection(PlaywrightTester tester, string direction)
+    {
+        await tester.Page.ClickAsync(".wallet-transactions__direction");
+        await tester.Page.ClickAsync($".wallet-transactions__direction-option:has-text('{direction}')");
+    }
+
     [Fact]
     [Trait("Playwright", "Playwright-2")]
     public async Task CanUseCoinSelection()
@@ -626,7 +1382,7 @@ public class WalletTests(ITestOutputHelper helper) : UnitTestBase(helper)
         await s.StartAsync();
         await s.RegisterNewUser(true);
         var (_, storeId) = await s.CreateNewStore();
-        await s.GenerateWallet("BTC", "", false, true);
+        await s.GenerateWallet("BTC", "", true);
         var walletId = new WalletId(storeId, "BTC");
         await s.GoToWallet(walletId, WalletsNavPages.Receive);
         var addressStr = await s.Page.Locator("#Address").GetAttributeAsync("data-text");

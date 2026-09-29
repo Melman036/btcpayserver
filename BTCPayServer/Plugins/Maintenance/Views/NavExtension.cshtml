@@ -1,0 +1,18 @@
+@model BTCPayServer.Components.MainNav.MainNavViewModel
+@inject HostIntegrationState HostIntegrationState
+@{
+    var hostIntegration = HostIntegrationState.Current;
+}
+
+@if (hostIntegration is not null)
+{
+    <li permission="@Policies.CanModifyServerSettings">
+        <a
+            id="menu-item-@nameof(MaintenancePlugin)"
+            class="dropdown-item@(ViewData["ActivePage"]?.ToString() == nameof(MaintenancePlugin) ? " active" : "")"
+            asp-area="@MaintenancePlugin.Area"
+            asp-controller="UIMaintenance"
+            asp-action="Maintenance"
+            text-translate="true">Maintenance</a>
+    </li>
+}

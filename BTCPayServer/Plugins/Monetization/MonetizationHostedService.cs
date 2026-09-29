@@ -1,6 +1,5 @@
 #nullable enable
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,9 +23,10 @@ public class MonetizationHostedService(
     EventAggregator eventAggregator,
     SettingsRepository settingsRepository,
     UserService userService,
-    BTCPayServerSecurityStampValidator.DisabledUsers disabledUsers,
+    BTCPayServerSecurityStampValidator.SecurityStampInvalidator securityStampInvalidator,
     ISettingsAccessor<MonetizationSettings> monetizationSettingsAccessor,
     IServiceScopeFactory serviceScopeFactory,
+    SubscriptionHostedService subsService,
     Logs logger) : EventHostedServiceBase(eventAggregator, logger)
 {
     public class MonetizationLockoutUpdated((string UserId, bool LockoutEnabled)[] updated)
@@ -41,8 +41,10 @@ public class MonetizationHostedService(
         this.Subscribe<SubscriptionEvent.SubscriberDisabled>();
         this.Subscribe<SubscriptionEvent.PlanUpdated>();
         this.Subscribe<SubscriptionEvent.PlanStarted>();
+        this.SubscribeAny<UserEvent.BypassMonetizationChanged>();
         this.SubscribeAny<UserEvent.Registered>();
         this.SubscribeAny<UserEvent.Deleted>();
+        this.SubscribeAny<UserEvent.DisabledChanged>();
     }
 
     protected override async Task ProcessEvent(object evt, CancellationToken cancellationToken)
@@ -98,12 +100,76 @@ public class MonetizationHostedService(
             await UpdateUserLockoutStatus(ctx, pu.Plan);
         }
 
+
+        if (evt is UserEvent.BypassMonetizationChanged changed && monetizationSettingsAccessor.Settings is
+            {
+                OfferingId: { } byPassOfferingId,
+                DefaultPlanId: { } byPassDefaultPlanId
+            })
+        {
+            if (changed.Bypass)
+            {
+                await using var ctx = dbContextFactory.CreateContext();
+                var userSub = await ctx.Subscribers.GetBySelector(byPassOfferingId, CustomerSelector.ByIdentity(SubscriberDataExtensions.IdentityType, changed.User.Id));
+                if (userSub is not null)
+                {
+                    await userService.SetDisabled(changed.User.Id, false, nameof(MonetizationHostedService));
+                    EventAggregator.Publish(new MonetizationLockoutUpdated([(changed.User.Id, false)]));
+                }
+            }
+            else
+            {
+                await using var ctx = dbContextFactory.CreateContext();
+                var userSub = await ctx.Subscribers.GetBySelector(byPassOfferingId, CustomerSelector.ByIdentity(SubscriberDataExtensions.IdentityType, changed.User.Id));
+                if (userSub is not null)
+                {
+                    var shouldBeLocked = !userSub.IsActive || userSub.Phase == SubscriberData.PhaseTypes.Expired;
+                    if (shouldBeLocked)
+                    {
+                        await userService.SetDisabled(changed.User.Id, true, nameof(MonetizationHostedService));
+                        securityStampInvalidator.Invalidate(changed.User.Id);
+                        EventAggregator.Publish(new MonetizationLockoutUpdated([(changed.User.Id, true)]));
+                    }
+                }
+                else
+                {
+                    var inserted = await MigrateUsers(byPassOfferingId, byPassDefaultPlanId, OneUserQuery, parameters =>
+                    {
+                        parameters.Add("userId", changed.User.Id);
+                        parameters.Add("email", changed.User.Email);
+                        parameters.Add("customerId", CustomerData.GenerateId());
+                    });
+                    if (inserted.Length == 1)
+                    {
+                        var s = await ctx.Subscribers.GetByCustomerId(inserted[0].CustomerId, byPassOfferingId);
+                        if (s is not null)
+                            EventAggregator.Publish(new SubscriptionEvent.NewSubscriber(s, changed.RequestBaseUrl));
+                    }
+                }
+            }
+        }
+
+        if (evt is UserEvent.DisabledChanged { Disabled: true, Source: not nameof(MonetizationHostedService) } disabledChanged &&
+            monetizationSettingsAccessor.Settings is { OfferingId: { } dcOfferingId })
+        {
+            await using var ctx = dbContextFactory.CreateContext();
+            var sub = await ctx.Subscribers.GetBySelector(dcOfferingId,
+                CustomerSelector.ByIdentity(SubscriberDataExtensions.IdentityType, disabledChanged.User.Id));
+            if (sub is { IsSuspended: false })
+            {
+                await subsService.Suspend(sub.Id, "Account disabled by administrator");
+            }
+        }
+
         if (evt is UserEvent.Registered reg && monetizationSettingsAccessor.Settings is
             {
                 OfferingId: { } offeringId,
                 DefaultPlanId: { } defaultPlanId
             })
         {
+            if (reg.User.BypassMonetization)
+                return;
+
             if (await userService.IsAdminUser(reg.User))
                 return;
             await using var ctx = dbContextFactory.CreateContext();
@@ -144,7 +210,7 @@ public class MonetizationHostedService(
         var userId = evt.Subscriber.GetApplicationUserId();
         var user = await userManager.FindByIdAsync(userId ?? "");
         if (user is not null &&
-            await userService.SetDisabled(user.Id, !activated) is not UserService.SetDisabledResult.Error)
+            await userService.SetDisabled(user.Id, !activated, nameof(MonetizationHostedService)) is not UserService.SetDisabledResult.Error)
         {
             EventAggregator.Publish(new MonetizationLockoutUpdated([(user.Id, !activated)]));
         }
@@ -164,7 +230,7 @@ public class MonetizationHostedService(
         => monetizationSettingsAccessor.Settings.OfferingId == se.Subscriber.OfferingId;
 
 
-    private const string NonAdminUserQuery = """
+    private const string AllUsersQuery = """
                                              WITH subs AS (
                                                  SELECT s.id, ci.value user_id
                                                  FROM subs_subscribers s
@@ -177,6 +243,7 @@ public class MonetizationHostedService(
                                                        LEFT JOIN "AspNetUserRoles" ur ON u."Id" = ur."UserId"
                                                        LEFT JOIN "AspNetRoles" r ON r."Name"=@adminRole AND ur."RoleId" = r."Id"
                                                  WHERE r."Id" IS NULL
+                                                 AND u."BypassMonetization" = false
                                              ),
                                              users_to_migrate AS (
                                                  SELECT u.user_id, u.email, NULL as customer_id
@@ -192,7 +259,7 @@ public class MonetizationHostedService(
                                         )
                                         """;
 
-    public async Task<(string CustomerId, string UserId)[]> MigrateUsers(string? offeringId, string? planId, string usersQuery = NonAdminUserQuery, Action<DynamicParameters>? addParameters = null)
+    public async Task<(string CustomerId, string UserId)[]> MigrateUsers(string? offeringId, string? planId, string usersQuery = AllUsersQuery, Action<DynamicParameters>? addParameters = null)
     {
         if (offeringId is null || planId is null)
             return Array.Empty<(string CustomerId, string UserId)>();
@@ -338,9 +405,7 @@ public class MonetizationHostedService(
                 })).ToArray();
         foreach (var update in updated)
             if (update.LockoutEnabled)
-                disabledUsers.Add(update.UserId);
-            else
-                disabledUsers.Remove(update.UserId);
+                securityStampInvalidator.Invalidate(update.UserId);
 
         await ctx.Users.UpdateStoreNoActiveUserForUsers(updated.Select(u => u.UserId).ToArray());
         EventAggregator.Publish(new MonetizationLockoutUpdated(updated));

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.RegularExpressions;
@@ -32,7 +31,6 @@ using Ganss.Xss;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Http.Extensions;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 using NBitcoin;
@@ -44,7 +42,6 @@ using StoreData = BTCPayServer.Data.StoreData;
 
 namespace BTCPayServer.Plugins.PointOfSale.Controllers
 {
-    [AutoValidateAntiforgeryToken]
     [Route("apps")]
     public class UIPointOfSaleController : Controller
     {
@@ -60,7 +57,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
             DisplayFormatter displayFormatter,
             IRateLimitService rateLimitService,
             IAuthorizationService authorizationService,
-            UserManager<ApplicationUser> userManager,
             HtmlSanitizer htmlSanitizer,
             Safe safe)
         {
@@ -73,7 +69,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
             _displayFormatter = displayFormatter;
             _rateLimitService = rateLimitService;
             _authorizationService = authorizationService;
-            _userManager = userManager;
             _htmlSanitizer = htmlSanitizer;
             _safe = safe;
             StringLocalizer = stringLocalizer;
@@ -89,7 +84,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
         private readonly DisplayFormatter _displayFormatter;
         private readonly IRateLimitService _rateLimitService;
         private readonly IAuthorizationService _authorizationService;
-        private readonly UserManager<ApplicationUser> _userManager;
         private readonly HtmlSanitizer _htmlSanitizer;
         private readonly Safe _safe;
         public FormDataService FormDataService { get; }
@@ -144,6 +138,8 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 CustomTipText = settings.CustomTipText,
                 CustomTipPercentages = settings.CustomTipPercentages,
                 DefaultTaxRate =  settings.DefaultTaxRate,
+                TipTaxRate = settings.TipTaxRate,
+                TaxIncludedInPrice = settings.TaxIncludedInPrice,
                 AppId = appId,
                 StoreId = store.Id,
                 HtmlLang = settings.HtmlLang,
@@ -201,7 +197,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                                                         [ModelBinder(typeof(InvariantDecimalModelBinder))] decimal? customAmount = null,
                                                         string email = null,
                                                         string orderId = null,
-                                                        string notificationUrl = null,
                                                         string redirectUrl = null,
                                                         string choiceKey = null,
                                                         string posData = null,
@@ -233,15 +228,28 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     ? Json(new { error = StringLocalizer["App not found"].Value })
                     : NotFound();
 
-            // not allowing negative tips or discounts
-            if (tip < 0 || discount < 0)
-                return Error(StringLocalizer["Negative tip or discount is not allowed"].Value);
-
-            if (string.IsNullOrEmpty(choiceKey) && (amount < 0 || customAmount < 0))
-                return Error(StringLocalizer["Negative amount is not allowed"].Value);
+            // Clamp untrusted public inputs to the same bounds enforced by the UI.
+            if (tip < 0)
+                tip = 0;
+            if (discount < 0)
+                discount = 0;
+            if (amount < 0)
+                amount = 0;
+            if (customAmount < 0)
+                customAmount = 0;
 
             var settings = app.GetSettings<PointOfSaleSettings>();
             settings.DefaultView = settings.EnableShoppingCart ? PosViewType.Cart : settings.DefaultView;
+
+            if (!settings.ShowDiscount)
+                discount = 0;
+            if (!settings.EnableTips)
+                tip = 0;
+            if (!settings.ShowCustomAmount)
+                customAmount = 0;
+            if (discount > 100)
+                discount = 100;
+
             var currentView = viewType ?? settings.DefaultView;
             if (string.IsNullOrEmpty(choiceKey) && !settings.ShowCustomAmount &&
                 currentView != PosViewType.Cart && currentView != PosViewType.Light)
@@ -259,6 +267,16 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
             }
 
             jposData.Cart ??= [];
+            if (jposData.Amounts is not null)
+                jposData.Amounts = jposData.Amounts.Select(a => Math.Max(0, a)).ToArray();
+            foreach (var cartItem in jposData.Cart)
+            {
+                cartItem.Count = Math.Max(1, cartItem.Count);
+                cartItem.Price = Math.Max(0, cartItem.Price);
+            }
+            if (jposData.Cart.Any(cartItem => string.IsNullOrEmpty(cartItem.Id)))
+                return NotFound();
+            var requestedQuantities = jposData.Cart.GroupBy(item => item.Id).ToDictionary(group => group.Key, group => group.Sum(item => (long)item.Count));
 
             if (currentView is PosViewType.Print)
                 return NotFound();
@@ -269,11 +287,11 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 jposData.Amounts is null &&
                 amount is { } o)
             {
-                order.AddLine(new("", 1, o, settings.DefaultTaxRate));
+                order.AddLine(new("", 1, o, settings.DefaultTaxRate, settings.TaxIncludedInPrice));
             }
             for (var i = 0; i < (jposData.Amounts ?? []).Length; i++)
             {
-                order.AddLine(new($"Custom Amount {i + 1}", 1, jposData.Amounts[i], settings.DefaultTaxRate));
+                order.AddLine(new($"Custom Amount {i + 1}", 1, jposData.Amounts[i], settings.DefaultTaxRate, settings.TaxIncludedInPrice));
             }
 
             foreach (var cartItem in jposData.Cart)
@@ -281,10 +299,10 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 var itemChoice = choices.FirstOrDefault(item => item.Id == cartItem.Id);
                 if (itemChoice == null)
                     return NotFound();
-                selectedChoices.Add(itemChoice);
                 if (itemChoice.Inventory is <= 0 ||
-                    itemChoice.Inventory is { } inv && inv < cartItem.Count)
+                    itemChoice.Inventory is { } inv && inv < requestedQuantities[cartItem.Id])
                     return Error(StringLocalizer["Inventory for {0} exhausted: {1} available", itemChoice.Title, itemChoice.Inventory]);
+                selectedChoices.Add(itemChoice);
 
                 if (itemChoice.PriceType is not AppItemPriceType.Topup)
                 {
@@ -292,14 +310,15 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     if (cartItem.Price < expectedCartItemPrice)
                         cartItem.Price = expectedCartItemPrice;
                 }
-                order.AddLine(new(cartItem.Id, cartItem.Count, cartItem.Price, itemChoice.TaxRate ?? settings.DefaultTaxRate));
+                order.AddLine(new(cartItem.Id, cartItem.Count, cartItem.Price, itemChoice.TaxRate ?? settings.DefaultTaxRate, settings.TaxIncludedInPrice));
             }
             if (customAmount is { } c && settings.ShowCustomAmount)
-                order.AddLine(new("", 1, c, settings.DefaultTaxRate));
+                order.AddLine(new("", 1, c, settings.DefaultTaxRate, settings.TaxIncludedInPrice));
             if (discount is { } d)
                 order.AddDiscountRate(d);
             if (tip is { } t)
                 order.AddTip(t);
+            order.SetTipTaxRate(settings.TipTaxRate);
 
             var store = await _appService.GetStore(app);
             var storeBlob = store.GetStoreBlob();
@@ -358,7 +377,7 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     if (invoiceRequest.Amount is not null && originalAmount != invoiceRequest.Amount.Value )
                     {
                         var diff = invoiceRequest.Amount.Value - originalAmount;
-                        order.AddLine(new("", 1, diff, settings.DefaultTaxRate));
+                        order.AddLine(new("", 1, diff, settings.DefaultTaxRate, false));
                     }
                     break;
             }
@@ -382,7 +401,8 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                         ItemCode = selectedChoices is [{} c1] ? c1.Id : null,
                         ItemDesc = selectedChoices is [{} c2] ? c2.Title : null,
                         BuyerEmail = email,
-                        TaxIncluded = summary.Tax == 0m ? null : summary.Tax,
+                        TaxIncluded = (summary.Tax - summary.TaxOnTip) <= 0m ? null : (summary.Tax - summary.TaxOnTip),
+                        TaxOnTip = summary.TaxOnTip == 0m ? null : summary.TaxOnTip,
                         OrderId = orderId ?? AppService.GetRandomOrderId(),
                         OrderUrl = Request.GetDisplayUrl(),
                         PosData = JObject.FromObject(jposData),
@@ -401,8 +421,7 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     new List<string> { AppService.GetAppInternalTag(appId) },
                     cancellationToken, entity =>
                     {
-                        entity.NotificationURLTemplate =
-                            string.IsNullOrEmpty(notificationUrl) ? settings.NotificationUrl : notificationUrl;
+                        entity.NotificationURLTemplate = settings.NotificationUrl;
                         entity.FullNotifications = true;
                         entity.ExtendedNotifications = true;
                         if (formResponseJObject is not null)
@@ -491,7 +510,7 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 vm.RouteParameters.Add("viewType", viewType.Value.ToString());
             }
 
-            return View("Views/UIForms/View", vm);
+            return View("/Plugins/Forms/Views/View.cshtml", vm);
         }
 
         [HttpPost("/apps/{appId}/pos/form/submit/{viewType?}")]
@@ -541,7 +560,7 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
             viewModel.Form = form;
             viewModel.FormParameters = formParameters;
             viewModel.StoreBranding = await StoreBrandingViewModel.CreateAsync(Request, _uriResolver, storeBlob);
-            return View("Views/UIForms/View", viewModel);
+            return View("/Plugins/Forms/Views/View.cshtml", viewModel);
         }
 
         [Authorize(Policy = Policies.CanViewInvoices, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
@@ -589,6 +608,8 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 AppName = app.Name,
                 Title = settings.Title,
                 DefaultTaxRate = settings.DefaultTaxRate,
+                TipTaxRate = settings.TipTaxRate,
+                TaxIncludedInPrice = settings.TaxIncludedInPrice,
                 DefaultView = settings.DefaultView,
                 ShowItems = settings.ShowItems,
                 ShowCustomAmount = settings.ShowCustomAmount,
@@ -623,7 +644,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     builder.AppendLine($"  <input type=\"hidden\" name=\"amount\" value=\"100\" />");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"email\" value=\"customer@example.com\" />");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"orderId\" value=\"CustomOrderId\" />");
-                    builder.AppendLine($"  <input type=\"hidden\" name=\"notificationUrl\" value=\"https://example.com/callbacks\" />");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"redirectUrl\" value=\"https://example.com/thanksyou\" />");
                     builder.AppendLine($"  <button type=\"submit\">Buy now</button>");
                     builder.AppendLine($"</form>");
@@ -636,7 +656,6 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                     builder.AppendLine(CultureInfo.InvariantCulture, $"<form method=\"POST\" action=\"{encoder.Encode(appUrl)}\">");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"email\" value=\"customer@example.com\" />");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"orderId\" value=\"CustomOrderId\" />");
-                    builder.AppendLine($"  <input type=\"hidden\" name=\"notificationUrl\" value=\"https://example.com/callbacks\" />");
                     builder.AppendLine($"  <input type=\"hidden\" name=\"redirectUrl\" value=\"https://example.com/thanksyou\" />");
                     builder.AppendLine(CultureInfo.InvariantCulture, $"  <button type=\"submit\" name=\"choiceKey\" value=\"{items[0].Id}\">Buy now</button>");
                     builder.AppendLine($"</form>");
@@ -686,6 +705,8 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
                 Title = vm.Title,
                 DefaultView = vm.DefaultView,
                 DefaultTaxRate = vm.DefaultTaxRate ?? 0,
+                TipTaxRate = vm.TipTaxRate ?? 0,
+                TaxIncludedInPrice = vm.TaxIncludedInPrice,
                 ShowItems = vm.ShowItems,
                 ShowCustomAmount = vm.ShowCustomAmount,
                 ShowDiscount = vm.ShowDiscount,
@@ -744,19 +765,13 @@ namespace BTCPayServer.Plugins.PointOfSale.Controllers
             return currency.Trim().ToUpperInvariant();
         }
 
-        private StoreData GetCurrentStore() => HttpContext.GetStoreData();
-
-        private AppData GetCurrentApp() => HttpContext.GetAppData();
+        private AppData GetCurrentApp() => HttpContext.GetAppDataOrNull();
 
         private async Task FillUsers(UpdatePointOfSaleViewModel vm)
         {
-            var users = await _storeRepository.GetStoreUsers(GetCurrentStore().Id);
-
-            if (!User.IsInRole(Roles.ServerAdmin))
-                users = users.Where(u => u.Id == _userManager.GetUserId(User)).ToArray();
-
-            vm.StoreUsers = users.Select(u => (u.Id, u.Email, u.StoreRole.Role))
-                .ToDictionary(u => u.Id, u => $"{u.Email} ({u.Role})");
+            var users = await _storeRepository.GetStoreUsers(HttpContext.GetStoreData().Id);
+            vm.StoreUserEmails = users.Select(u => (u.Email, u.StoreRole.Role))
+                .ToDictionary(u => u.Email, u => $"{u.Email} ({u.Role})");
         }
     }
 }

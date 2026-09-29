@@ -1,11 +1,9 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Contracts;
-using BTCPayServer.Client;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Configuration;
 using BTCPayServer.Data;
@@ -13,18 +11,14 @@ using BTCPayServer.Data.Payouts.LightningLike;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
-using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Payouts;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
 using LNURL;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using NBitcoin;
-using Newtonsoft.Json.Linq;
 using static BTCPayServer.Data.Payouts.LightningLike.UILightningLikePayoutController;
 using MarkPayoutRequest = BTCPayServer.HostedServices.MarkPayoutRequest;
 using PayoutData = BTCPayServer.Data.PayoutData;
@@ -34,21 +28,20 @@ namespace BTCPayServer.PayoutProcessors.Lightning;
 
 public class LightningAutomatedPayoutProcessor : BaseAutomatedPayoutProcessor<LightningAutomatedPayoutBlob>
 {
+	public const double MaxRoutingFeePercent = 3.0;
+
 	private readonly BTCPayNetworkJsonSerializerSettings _btcPayNetworkJsonSerializerSettings;
 	private readonly LightningClientFactoryService _lightningClientFactoryService;
-	private readonly UserService _userService;
 	private readonly IOptions<LightningNetworkOptions> _options;
 	private readonly PullPaymentHostedService _pullPaymentHostedService;
 	private readonly LightningLikePayoutHandler _payoutHandler;
 	public BTCPayNetwork Network => _payoutHandler.Network;
-	private readonly PaymentMethodHandlerDictionary _handlers;
 
 	public LightningAutomatedPayoutProcessor(
 		PayoutMethodId payoutMethodId,
 		BTCPayNetworkJsonSerializerSettings btcPayNetworkJsonSerializerSettings,
 		LightningClientFactoryService lightningClientFactoryService,
 		PayoutMethodHandlerDictionary payoutHandlers,
-		UserService userService,
 		ILoggerFactory logger, IOptions<LightningNetworkOptions> options,
 		StoreRepository storeRepository, PayoutProcessorData payoutProcessorSettings,
 		ApplicationDbContextFactory applicationDbContextFactory,
@@ -61,11 +54,9 @@ public class LightningAutomatedPayoutProcessor : BaseAutomatedPayoutProcessor<Li
 	{
 		_btcPayNetworkJsonSerializerSettings = btcPayNetworkJsonSerializerSettings;
 		_lightningClientFactoryService = lightningClientFactoryService;
-		_userService = userService;
 		_options = options;
 		_pullPaymentHostedService = pullPaymentHostedService;
 		_payoutHandler = GetPayoutHandler(payoutHandlers, payoutMethodId);
-		_handlers = handlers;
 	}
 	private static LightningLikePayoutHandler GetPayoutHandler(PayoutMethodHandlerDictionary payoutHandlers, PayoutMethodId payoutMethodId)
 	{
@@ -240,7 +231,8 @@ public class LightningAutomatedPayoutProcessor : BaseAutomatedPayoutProcessor<Li
             var pay = await lightningClient.Pay(bolt11PaymentRequest.ToString(),
                 new PayInvoiceParams()
                 {
-                    Amount = new LightMoney((decimal)payoutData.Amount, LightMoneyUnit.BTC)
+                    Amount = new LightMoney((decimal)payoutData.Amount, LightMoneyUnit.BTC),
+                    MaxFeePercent = MaxRoutingFeePercent
                 }, cancellationToken);
             if (pay is { Result: PayResult.CouldNotFindRoute })
             {
@@ -291,7 +283,7 @@ public class LightningAutomatedPayoutProcessor : BaseAutomatedPayoutProcessor<Li
 
         if (preimage is not null)
             proofBlob.Preimage = preimage;
-        
+
         var vm = new ResultVM
         {
             PayoutId = payoutData.Id,

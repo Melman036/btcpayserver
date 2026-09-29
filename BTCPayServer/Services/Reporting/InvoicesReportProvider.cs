@@ -9,7 +9,6 @@ using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
 using BTCPayServer.Rating;
 using BTCPayServer.Services.Invoices;
-using BTCPayServer.Services.Rates;
 using BTCPayServer.Services.Stores;
 using Newtonsoft.Json.Linq;
 
@@ -87,6 +86,7 @@ public class InvoicesReportProvider : ReportProvider
             EndDate = queryContext.To,
             StartDate = queryContext.From,
             StoreId = new[] { queryContext.StoreId },
+            OrderByDesc = false,
         }, cancellation);
 
         queryContext.ViewDefinition = new ViewDefinition()
@@ -101,6 +101,7 @@ public class InvoicesReportProvider : ReportProvider
                 new("InvoiceFullStatus", "text"),
                 new("InvoiceStatus", "text"),
                 new("InvoiceExceptionStatus", "text"),
+                new("InvoiceComment", "text"),
 
                 new("PaymentReceivedDate", "datetime"),
                 new("PaymentId", "text"),
@@ -182,6 +183,7 @@ public class InvoicesReportProvider : ReportProvider
         data.Add(invoiceEntity?.GetInvoiceState().ToString());
         data.Add(invoiceEntity?.Status.ToString());
         data.Add(invoiceEntity?.ExceptionStatus is null or InvoiceExceptionStatus.None ? "" : invoiceEntity.ExceptionStatus.ToString());
+        data.Add(invoiceEntity?.Metadata.Comment ?? "");
 
 
         data.Add(payment?.ReceivedTime);

@@ -1,6 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.RegularExpressions;
@@ -15,20 +13,21 @@ using BTCPayServer.Models.AppViewModels;
 using BTCPayServer.Plugins.PointOfSale;
 using BTCPayServer.Plugins.PointOfSale.Controllers;
 using BTCPayServer.Plugins.PointOfSale.Models;
+using BTCPayServer.Services;
 using BTCPayServer.Services.Apps;
 using BTCPayServer.Tests.PMO;
 using BTCPayServer.Views.Server;
 using BTCPayServer.Views.Stores;
 using LNURL;
+using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Playwright;
-using static Microsoft.Playwright.Assertions;
 using NBitcoin;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Xunit;
-using Xunit.Abstractions;
 using static BTCPayServer.Tests.UnitTest1;
+using static Microsoft.Playwright.Assertions;
 using PosViewType = BTCPayServer.Plugins.PointOfSale.PosViewType;
 
 namespace BTCPayServer.Tests
@@ -179,10 +178,13 @@ fruit tea:
             await invoiceRepo.UpdateInvoiceExpiry(expiredLatePaidInvoiceId, TimeSpan.Zero);
             TestLogs.LogInformation($"Expired late paid invoice ID: {expiredLatePaidInvoiceId}");
 
-            var address = (await client.GetInvoicePaymentMethods(s.StoreId, expiredLatePaidInvoiceId))[0].Destination;
+            var address = (await client.GetInvoicePaymentMethods(expiredLatePaidInvoiceId))[0].Destination;
             await s.Server.ExplorerNode.SendToAddressAsync(BitcoinAddress.Create(address, Network.RegTest), Money.Coins(1.0m));
 
             // One 0 amount invoice
+            var store = await client.GetStore(s.StoreId);
+            store.AllowZeroAmountInvoices = true;
+            await client.UpdateStore(store.Id, store);
             var freeInvoiceId = await s.CreateInvoice(amount: 0m);
             TestLogs.LogInformation($"Free invoice ID: {freeInvoiceId}");
 
@@ -193,11 +195,11 @@ fruit tea:
             await s.PayInvoice(amount: 0.4m, mine: false);
             await s.PayInvoice(mine: true);
 
-            var expiredLatePaidInvoice = await client.GetInvoice(s.StoreId, expiredLatePaidInvoiceId);
+            var expiredLatePaidInvoice = await client.GetInvoice(expiredLatePaidInvoiceId);
             Assert.Equal(InvoiceStatus.Expired, expiredLatePaidInvoice.Status);
             Assert.Equal(InvoiceExceptionStatus.PaidLate, expiredLatePaidInvoice.AdditionalStatus);
 
-            var expiredInvoice = await client.GetInvoice(s.StoreId, expiredInvoiceId);
+            var expiredInvoice = await client.GetInvoice(expiredInvoiceId);
             Assert.Equal(InvoiceStatus.Expired, expiredInvoice.Status);
             Assert.Equal(InvoiceExceptionStatus.None, expiredInvoice.AdditionalStatus);
 
@@ -208,7 +210,7 @@ fruit tea:
             periodicTask.Now = DateTimeOffset.UtcNow.AddMonths(8);
             deleted = await periodicTask.RunScript("Invoice Cleanup");
             Assert.NotEqual(0, deleted);
-            await AssertEx.AssertApiError(404, "invoice-not-found", () => client.GetInvoice(s.StoreId, expiredInvoiceId));
+            await AssertEx.AssertApiError(404, "invoice-not-found", () => client.GetInvoice(expiredInvoiceId));
 
             await s.GoToStore(s.StoreId);
             await s.CreateApp("PointOfSale");
@@ -344,11 +346,15 @@ goodies:
             Assert.IsType<NotFoundResult>(publicApps
                 .ViewPointOfSale(app.Id, PosViewType.Cart, 0, choiceKey: "apple").Result);
 
+            var client = await user.CreateClient();
+            var store = await client.GetStore(user.StoreId);
+            store.AllowZeroAmountInvoices = true;
+            await client.UpdateStore(store.Id, store);
+
             var redirectToCheckout = Assert.IsType<RedirectToActionResult>(publicApps.ViewPointOfSale(app.Id, PosViewType.Cart, 0, choiceKey: "goodies").Result);
             Assert.Equal("InvoiceReceipt", redirectToCheckout.ActionName);
             var invoiceId = redirectToCheckout.RouteValues!["invoiceId"]!.ToString();
-            var client = await user.CreateClient();
-            var inv = await client.GetInvoice(user.StoreId, invoiceId);
+            var inv = await client.GetInvoice(invoiceId);
             Assert.Equal(0, inv.Amount);
             Assert.NotEqual(InvoiceType.TopUp, inv.Type);
 
@@ -361,7 +367,8 @@ goodies:
             pos.HttpContext.SetAppData(appData);
             Assert.Single(appList.Apps);
             Assert.Equal("test", app.AppName);
-            Assert.True(app.Role.ToPermissionSet(appList.Apps[0].StoreId).Contains(Policies.CanModifyStoreSettings, app.StoreId));
+            var permissionService = tester.PayTester.GetService<PermissionService>();
+            Assert.True(app.Role.ToPermissionSet(appList.Apps[0].StoreId).HasPermission(Permission.Create(Policies.CanModifyStoreSettings, app.StoreId), permissionService));
             Assert.Equal(user.StoreId, app.StoreId);
             Assert.False(app.Archived);
             // Archive
@@ -386,6 +393,36 @@ goodies:
             Assert.Equal(nameof(UIStoresController.Dashboard), redirectToAction.ActionName);
             appList = await apps.ListApps(user.StoreId).AssertViewModelAsync<ListAppsViewModel>();
             Assert.Empty(appList.Apps);
+
+            // Quick tests on permissions
+            Assert.True(permissionService.Contains(Permission.Create(Policies.CanModifyServerSettings),
+                Permission.Create(Policies.CanModifyServerSettings)));
+            Assert.True(permissionService.Contains(Permission.Create(Policies.CanModifyProfile),
+                Permission.Create(Policies.CanViewProfile)));
+            Assert.True(permissionService.Contains(Permission.Create(Policies.CanModifyStoreSettings),
+                Permission.Create(Policies.CanViewStoreSettings)));
+            Assert.False(permissionService.Contains(Permission.Create(Policies.CanViewStoreSettings),
+                Permission.Create(Policies.CanModifyStoreSettings)));
+            Assert.False(permissionService.Contains(Permission.Create(Policies.CanModifyServerSettings),
+                Permission.Create(Policies.CanModifyStoreSettings)));
+            Assert.True(permissionService.Contains(Permission.Create(Policies.Unrestricted),
+                Permission.Create(Policies.CanModifyStoreSettings)));
+            Assert.True(permissionService.Contains(Permission.Create(Policies.Unrestricted),
+                Permission.Create(Policies.CanModifyStoreSettings, "abc")));
+
+            Assert.True(permissionService.Contains(Permission.Create(Policies.CanViewStoreSettings),
+                Permission.Create(Policies.CanViewStoreSettings, "abcd")));
+            Assert.False(permissionService.Contains(Permission.Create(Policies.CanModifyStoreSettings, "abcd"),
+                Permission.Create(Policies.CanModifyStoreSettings)));
+
+            foreach (var def in permissionService.Definitions.Values)
+            {
+                Assert.NotNull(def?.Display);
+                if (def.Type is PolicyType.Store)
+                {
+                    Assert.NotNull(def?.ScopeDisplay);
+                }
+            }
         }
 
         [Fact]
@@ -411,6 +448,7 @@ goodies:
 
             // Setup POS
             await s.CreateApp("PointOfSale");
+            var editUrl = s.Page.Url;
             await s.Page.ClickAsync("label[for='DefaultView_Cart']");
             await s.Page.FillAsync("#Currency", "EUR");
             Assert.False(await s.Page.IsCheckedAsync("#EnableTips"));
@@ -432,6 +470,7 @@ goodies:
 
             // View
             await ViewApp(s);
+            var keypadUrl = s.Page.Url;
             await s.Page.WaitForSelectorAsync("#PosItems");
             Assert.Empty(await s.Page.QuerySelectorAllAsync("#CartItems tr"));
             var posUrl = s.Page.Url;
@@ -587,6 +626,68 @@ goodies:
                 await s.TakeScreenshot("BadInventory.png");
                 throw;
             }
+            await s.GoToUrl(editUrl);
+            await s.Page.FillAsync("#TipTaxRate", "5");
+            await s.ClickPagePrimary();
+            await s.FindAlertMessage(partialText: "App updated");
+
+            await s.GoToUrl(posUrl);
+            await s.Page.WaitForSelectorAsync("#PosItems");
+            await s.Page.ClickAsync(".posItem:nth-child(1) .btn-primary");
+            await s.Page.ClickAsync("#Tip-10");
+
+            await AssertCartSummary(s, new()
+            {
+                Subtotal = "1,00 €",
+                Taxes = "0,10 € (10%)",
+                Tip = "0,10 € (10%)",
+                TaxOnTip = "0,01 €",
+                Total = "1,21 €"
+            });
+
+            await s.Page.ClickAsync("#CartSubmit");
+            await s.Page.WaitForSelectorAsync("#Checkout");
+            await s.PayInvoice(true);
+
+            await s.Page.ClickAsync("#ReceiptLink");
+            await s.Page.WaitForSelectorAsync("#CartData table");
+            await AssertReceipt(s, new()
+            {
+                Items = [
+                    new("Green Tea", "1 x 1,00 € = 1,00 €")
+                ],
+                Sums = [
+                    new("Subtotal", "1,00 €"),
+                    new("Tax", "0,10 € (10%)"),
+                    new("Tip", "0,10 € (10%)"),
+                    new("Tax on tip", "0,01 €"),
+                    new("Total", "1,21 €")
+                ]
+            });
+
+            await s.GoToUrl(editUrl);
+            await s.Page.ClickAsync("#TaxIncludedInPrice");
+            await s.ClickPagePrimary();
+            await s.FindAlertMessage(partialText: "App updated");
+
+            await s.GoToUrl(posUrl);
+            await s.Page.WaitForSelectorAsync("#PosItems");
+            await s.Page.ClickAsync(".posItem:nth-child(1) .btn-primary");
+
+            await AssertCartSummary(s, new()
+            {
+                Subtotal = "0,91 €",
+                Taxes = "0,09 € (10%)",
+                Total = "1,00 €"
+            });
+
+            await s.Page.ClickAsync("#CartSubmit");
+            await s.Page.WaitForSelectorAsync("#Checkout");
+            await s.Page.ClickAsync("#DetailsToggle");
+            await s.Page.WaitForSelectorAsync("#PaymentDetails-TotalFiat");
+            Assert.Contains("0,09 €", await s.Page.TextContentAsync("#PaymentDetails-TaxIncluded"));
+            Assert.Contains("1,00 €", await s.Page.TextContentAsync("#PaymentDetails-TotalFiat"));
+            await s.PayInvoice(true);
 
 
             // Guest user can access recent transactions
@@ -617,11 +718,12 @@ goodies:
             public string ItemsTotal { get; set; }
             public string Discount { get; set; }
             public string Tip { get; set; }
+            public string TaxOnTip { get; set; }
         }
         private async Task AssertCartSummary(PlaywrightTester s, CartSummaryAssertion o)
         {
-            string[] ids = ["CartItemsTotal", "CartDiscount", "CartAmount", "CartTip", "CartTax", "CartTotal"];
-            string[] values = [o.ItemsTotal, o.Discount, o.Subtotal, o.Tip, o.Taxes, o.Total];
+            string[] ids = ["CartItemsTotal", "CartDiscount", "CartAmount", "CartTip", "CartTaxOnTip", "CartTax", "CartTotal"];
+            string[] values = [o.ItemsTotal, o.Discount, o.Subtotal, o.Tip, o.TaxOnTip, o.Taxes, o.Total];
             for (int i = 0; i < ids.Length; i++)
             {
                 if (values[i] != null)
@@ -787,7 +889,7 @@ goodies:
 
             // Amount: 1234,56
             await EnterKeypad(s, "123400");
-            Assert.Equal("1.234,00", await s.Page.TextContentAsync("#Amount"));
+            await Expect(s.Page.Locator("#Amount")).ToContainTextAsync("1.234,00");
             Assert.Equal("", await s.Page.TextContentAsync("#Calculation"));
             await EnterKeypad(s, "+56");
             Assert.Equal("0,56", await s.Page.TextContentAsync("#Amount"));
@@ -798,20 +900,21 @@ goodies:
             // Discount: 10%
             await s.Page.ClickAsync("label[for='ModeTablist-discount']");
             await EnterKeypad(s, "10");
-            Assert.Contains("0,56", await s.Page.TextContentAsync("#Amount"));
-            Assert.Contains("10% discount", await s.Page.TextContentAsync("#Discount"));
+            await Expect(s.Page.Locator("#Amount")).ToContainTextAsync("0,56");
+            await Expect(s.Page.Locator("#Discount")).ToContainTextAsync("10% discount");
             await AssertKeypadCalculation(s, "1.234,00 € + 0,56 € - 123,46 € (10%)", "1.111,10 €");
 
             // Tip: 10%
             await s.Page.ClickAsync("label[for='ModeTablist-tip']");
             await s.Page.ClickAsync("#Tip-10");
             Assert.Contains("0,56", await s.Page.TextContentAsync("#Amount"));
+            await Expect(s.Page.Locator("#Amount")).ToContainTextAsync("0,56");
             await AssertKeypadCalculation(s, "1.234,00 € + 0,56 € - 123,46 € (10%) + 111,11 € (10%)", "1.222,21 €");
 
             // Pay
             await s.Page.ClickAsync("#pay-button");
             await s.Page.ClickAsync("#DetailsToggle");
-            Assert.Contains("1 222,21 €", await s.Page.TextContentAsync("#PaymentDetails-TotalFiat"));
+            await Expect(s.Page.Locator("#PaymentDetails-TotalFiat")).ToContainTextAsync("1 222,21 €");
             await s.PayInvoice(true);
 
             // Receipt
@@ -846,21 +949,19 @@ goodies:
             await s.Page.ClickAsync("#ItemsListOffcanvas button[data-bs-dismiss='offcanvas']");
 
             await EnterKeypad(s, "123");
-            Assert.Contains("1,23", await s.Page.TextContentAsync("#Amount"));
-            await AssertKeypadCalculation(s, "2 x Green Tea (1,00 €) = 2,00 € + 1 x Black Tea (1,00 €) = 1,00 € + 1,23 € + 0,42 € (10%)", "4,65 €");
+            await Expect(s.Page.Locator("#Amount")).ToContainTextAsync("1,23");
+            await AssertKeypadCalculation(s, "2 x Green Tea (1,00 €) = 2,00 € + 1 x Black Tea (1,00 €) = 1,00 € + 1,23 € + 0,42 € (10% tax)", "4,65 €");
 
             // Pay
             await s.Page.ClickAsync("#pay-button");
             await s.Page.WaitForSelectorAsync("#Checkout");
             await s.Page.ClickAsync("#DetailsToggle");
-            await s.Page.WaitForSelectorAsync("#PaymentDetails-TotalFiat");
-            Assert.Contains("4,65 €", await s.Page.TextContentAsync("#PaymentDetails-TotalFiat"));
+            await Expect(s.Page.Locator("#PaymentDetails-TotalFiat")).ToContainTextAsync("4,65 €");
             await s.PayInvoice(true);
 
 
             // Receipt
             await s.Page.ClickAsync("#ReceiptLink");
-
             await AssertReceipt(s, new()
             {
                 Items = [
@@ -874,6 +975,11 @@ goodies:
                     new("Total", "4,65 €")
                 ]
             });
+
+            var client = await s.AsTestAccount().CreateClient();
+            var store = await client.GetStore(s.StoreId);
+            store.AllowZeroAmountInvoices = true;
+            await client.UpdateStore(store.Id, store);
 
             await s.GoToUrl(keypadUrl);
             await s.Page.ClickAsync("#ItemsListToggle");
@@ -895,6 +1001,23 @@ goodies:
                 ]
             });
 
+            await s.GoToUrl(editUrl);
+            await s.Page.FillAsync("#TipTaxRate", "5");
+            await s.ClickPagePrimary();
+            await s.FindAlertMessage(partialText: "App updated");
+
+            await s.GoToUrl(keypadUrl);
+            await EnterKeypad(s, "500");
+            await Expect(s.Page.Locator("#Amount")).ToContainTextAsync("5,00");
+            await s.Page.ClickAsync("label[for='ModeTablist-tip']");
+            await s.Page.ClickAsync("#Tip-10");
+            await s.Page.ClickAsync("label[for='ModeTablist-amounts']");
+            await AssertKeypadCalculation(s, "5,00 € + 0,50 € (10%) + 0,50 € (10% tax) + 0,03 € (5% tip tax)", "6,03 €");
+
+            await s.Page.ClickAsync("#pay-button");
+            await s.Page.WaitForSelectorAsync("#Checkout");
+            await s.PayInvoice(true);
+
             // Guest user can access recent transactions
             await s.GoToHome();
             await s.Logout();
@@ -914,8 +1037,7 @@ goodies:
             await s.Page.ClickAsync("#pay-button");
             await s.Page.WaitForSelectorAsync("#Checkout");
             await s.Page.ClickAsync("#DetailsToggle");
-            await s.Page.WaitForSelectorAsync("#PaymentDetails-TotalFiat");
-            Assert.Contains("1,35 €", await s.Page.TextContentAsync("#PaymentDetails-TotalFiat"));
+            await Expect(s.Page.Locator("#PaymentDetails-TotalFiat")).ToContainTextAsync("1,35 €");
         }
 
         private static async Task AssertKeypadCalculation(PlaywrightTester s, string expectedCalculation, string expectedTotal)
@@ -933,6 +1055,7 @@ goodies:
 
         private async Task AssertReceipt(PlaywrightTester s, AssertReceiptAssertion assertion)
         {
+            await s.Page.WaitForSelectorAsync("#ReceiptLinkPrint");
             await AssertReceipt(s, assertion, "#CartData table tbody tr", "#CartData table tfoot tr");
             // Receipt print
             var o = s.Page.Context.WaitForPageAsync();
@@ -945,22 +1068,32 @@ goodies:
 
         private async Task AssertReceipt(PlaywrightTester s, AssertReceiptAssertion assertion, string itemSelector, string sumsSelector)
         {
-            var items = await s.Page.QuerySelectorAllAsync(itemSelector);
-            var sums = await s.Page.QuerySelectorAllAsync(sumsSelector);
-            Assert.Equal(assertion.Items.Length, items.Count);
-            Assert.Equal(assertion.Sums.Length, sums.Count);
-            for (int i = 0; i < assertion.Items.Length; i++)
+            try
             {
-                var txt = (await items[i].TextContentAsync()).NormalizeWhitespaces();
-                Assert.Contains(assertion.Items[i].Key.NormalizeWhitespaces(), txt);
-                Assert.Contains(assertion.Items[i].Value.NormalizeWhitespaces(), txt);
-            }
+                var itemRows = s.Page.Locator(itemSelector);
+                var sumRows = s.Page.Locator(sumsSelector);
+                await Expect(itemRows).ToHaveCountAsync(assertion.Items.Length);
+                await Expect(sumRows).ToHaveCountAsync(assertion.Sums.Length);
+                var items = await itemRows.ElementHandlesAsync();
+                var sums = await sumRows.ElementHandlesAsync();
+                for (int i = 0; i < assertion.Items.Length; i++)
+                {
+                    var txt = (await items[i].TextContentAsync()).NormalizeWhitespaces();
+                    Assert.Contains(assertion.Items[i].Key.NormalizeWhitespaces(), txt);
+                    Assert.Contains(assertion.Items[i].Value.NormalizeWhitespaces(), txt);
+                }
 
-            for (int i = 0; i < assertion.Sums.Length; i++)
+                for (int i = 0; i < assertion.Sums.Length; i++)
+                {
+                    var txt = (await sums[i].TextContentAsync()).NormalizeWhitespaces();
+                    Assert.Contains(assertion.Sums[i].Key.NormalizeWhitespaces(), txt);
+                    Assert.Contains(assertion.Sums[i].Value.NormalizeWhitespaces(), txt);
+                }
+            }
+            catch
             {
-                var txt = (await sums[i].TextContentAsync()).NormalizeWhitespaces();
-                Assert.Contains(assertion.Sums[i].Key.NormalizeWhitespaces(), txt);
-                Assert.Contains(assertion.Sums[i].Value.NormalizeWhitespaces(), txt);
+                await s.TakeScreenshot("Flaky-POSTests.png");
+                throw;
             }
         }
 
@@ -999,13 +1132,23 @@ goodies:
             vmpos.Currency = "EUR";
             Assert.IsType<RedirectToActionResult>(pos.UpdatePointOfSale(app.Id, vmpos).Result);
 
-            // Failing requests
+            var client = await user.CreateClient();
+            var store = await client.GetStore(user.StoreId);
+            store.AllowZeroAmountInvoices = true;
+            await client.UpdateStore(store.Id, store);
+
+            // Clamped requests
             var (invoiceId1, error1) = await PosJsonRequest(tester, app.Id, "amount=-21&discount=10&tip=2");
-            Assert.Null(invoiceId1);
-            Assert.Equal("Negative amount is not allowed", error1);
+            Assert.NotNull(invoiceId1);
+            Assert.Null(error1);
+            var invoice1 = await user.BitPay.GetInvoiceAsync(invoiceId1);
+            Assert.Equal(0.00m, invoice1.Price);
+
             var (invoiceId2, error2) = await PosJsonRequest(tester, app.Id, "amount=21&discount=-10&tip=-2");
-            Assert.Null(invoiceId2);
-            Assert.Equal("Negative tip or discount is not allowed", error2);
+            Assert.NotNull(invoiceId2);
+            Assert.Null(error2);
+            var invoice2 = await user.BitPay.GetInvoiceAsync(invoiceId2);
+            Assert.Equal(21.00m, invoice2.Price);
 
             // Successful request
             var (invoiceId3, error3) = await PosJsonRequest(tester, app.Id, "amount=21");
@@ -1013,8 +1156,7 @@ goodies:
             Assert.Null(error3);
 
             // Check generated invoice
-            var invoices = await user.BitPay.GetInvoicesAsync();
-            var invoice = invoices.First();
+            var invoice = await user.BitPay.GetInvoiceAsync(invoiceId3);
             Assert.Equal(invoiceId3, invoice.Id);
             Assert.Equal(21.00m, invoice.Price);
             Assert.Equal("EUR", invoice.Currency);
@@ -1063,6 +1205,7 @@ goodies:
             await s.ClickPagePrimary();
             await s.FindAlertMessage();
 
+            await s.Page.Locator("#CodeTabButton").WaitForAsync();
             await s.Page.Locator("#CodeTabButton").ScrollIntoViewIfNeededAsync();
             await s.Page.ClickAsync("#CodeTabButton");
             template = await s.Page.Locator("#TemplateConfig").InputValueAsync();
@@ -1104,18 +1247,11 @@ goodies:
             // Let's set change the root app
             await s.GoToHome();
             await s.GoToServer(ServerNavPages.Policies);
+            await s.Page.Locator("#RootAppId").WaitForAsync();
             await s.Page.Locator("#RootAppId").ScrollIntoViewIfNeededAsync();
 
-            var options = await s.Page.Locator("#RootAppId option").AllTextContentsAsync();
-            var targetOption = options.FirstOrDefault(o => o.Contains("Point of"));
-            if (targetOption != null)
-            {
-                await s.Page.Locator("#RootAppId").SelectOptionAsync(new[] { new SelectOptionValue { Label = targetOption } });
-            }
-            else
-            {
-                throw new Exception($"Could not find Point of Sale option. Available options: {string.Join(", ", options)}");
-            }
+            await s.Page.Locator("#RootAppId").FillAsync(appId);
+
             await s.ClickPagePrimary();
             await s.FindAlertMessage();
 
@@ -1140,23 +1276,13 @@ goodies:
             // Let's check with domain mapping as well.
             await s.GoToUrl(prevUrl);
             await s.GoToServer(ServerNavPages.Policies);
-            await s.Page.Locator("#RootAppId").ScrollIntoViewIfNeededAsync();
-            await s.Page.Locator("#RootAppId").SelectOptionAsync("");
+            await s.Page.Locator("#RootAppId").FillAsync("");
             await s.ClickPagePrimary();
-            await s.Page.Locator("#RootAppId").ScrollIntoViewIfNeededAsync();
             await s.Page.ClickAsync("#AddDomainButton");
             await s.Page.Locator("#DomainToAppMapping_0__Domain").FillAsync(new Uri(s.Page.Url, UriKind.Absolute).DnsSafeHost);
 
-            var domainOptions = await s.Page.Locator("#DomainToAppMapping_0__AppId option").AllTextContentsAsync();
-            var targetDomainOption = domainOptions.FirstOrDefault(o => o.Contains("Point of"));
-            if (targetDomainOption != null)
-            {
-                await s.Page.Locator("#DomainToAppMapping_0__AppId").SelectOptionAsync(new[] { new SelectOptionValue { Label = targetDomainOption } });
-            }
-            else
-            {
-                throw new Exception($"Could not find Point of Sale option for domain mapping. Available options: {string.Join(", ", domainOptions)}");
-            }
+            await s.Page.Locator("#DomainToAppMapping_0__AppId").FillAsync(appId);
+
             await s.ClickPagePrimary();
             await s.FindAlertMessage(partialText: "Policies updated successfully");
 
@@ -1198,7 +1324,7 @@ goodies:
             var archivedText = await archivedLink.TextContentAsync();
             Assert.Contains("1 Archived App", archivedText);
 
-            await s.GoToUrl(posBaseUrl);
+            await s.GoToUrl(posBaseUrl, true);
             var title = await s.Page.TitleAsync();
             Assert.Contains("Page not found", title, StringComparison.OrdinalIgnoreCase);
             await s.Page.GoBackAsync();

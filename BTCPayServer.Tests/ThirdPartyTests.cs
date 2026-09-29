@@ -9,10 +9,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Controllers;
 using BTCPayServer.Data;
-using BTCPayServer.HostedServices;
 using BTCPayServer.Hosting;
 using BTCPayServer.Models.StoreViewModels;
-using BTCPayServer.Models.WalletViewModels;
+using BTCPayServer.Plugins.Wallets.Views.ViewModels;
 using BTCPayServer.Rating;
 using BTCPayServer.Services.Fees;
 using BTCPayServer.Services.Rates;
@@ -20,16 +19,12 @@ using BTCPayServer.Storage.Models;
 using BTCPayServer.Storage.Services.Providers.AzureBlobStorage.Configuration;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileSystemGlobbing;
 using NBitcoin;
 using NBitpayClient;
 using Newtonsoft.Json;
 using Xunit;
-using Xunit.Abstractions;
 using Xunit.Sdk;
-using static BTCPayServer.HostedServices.PullPaymentHostedService.PayoutApproval;
 
 namespace BTCPayServer.Tests
 {
@@ -197,7 +192,13 @@ namespace BTCPayServer.Tests
                         e => e.CurrencyPair == new CurrencyPair("BTC", "NGN") &&
                              e.BidAsk.Bid > 1.0m); // 1 BTC will always be more than 1 NGN
                 }
-                else if (name == "cryptomarket")
+                else if (name == "bitpay")
+                {
+                    Assert.Contains(exchangeRates.ByExchange[name],
+                        e => e.CurrencyPair == new CurrencyPair("BTC", "CLF") &&
+                             e.BidAsk.Bid > 1.0m); // 1 BTC will always be more than 1 UF
+                }
+                else if (name == "notbank")
                 {
                     Assert.Contains(exchangeRates.ByExchange[name],
                         e => e.CurrencyPair == new CurrencyPair("BTC", "CLP") &&
@@ -261,7 +262,7 @@ namespace BTCPayServer.Tests
             // Kraken emit one request only after first GetRates
             await factory.Providers["kraken"].GetRatesAsync(default);
 
-            var p = new KrakenExchangeRateProvider();
+            var p = new KrakenExchangeRateProvider(TestUtils.CreateHttpFactory());
             var rates = await p.GetRatesAsync(default);
             Assert.Contains(rates, e => e.CurrencyPair == new CurrencyPair("XMR", "BTC") && e.BidAsk.Bid < 1.0m);
 
@@ -293,13 +294,15 @@ namespace BTCPayServer.Tests
 
             var urlBlacklist = new string[]
             {
-                "https://www.btse.com", // not allowing to be hit from circleci
-                "https://www.bitpay.com", // not allowing to be hit from circleci
+                "https://zaphq.io", // Returns forbidden over test. Opening on tab, it redirects to strike
+                "https://www.btse.com", // not allowing to be hit from CI
+                "https://www.bitpay.com", // not allowing to be hit from CI
                 "https://support.bitpay.com",
                 "https://www.coingecko.com", // unhappy service
                 "https://www.wasabiwallet.io", // Banning US, CI unhappy
                 "https://fullynoded.app", // Sometimes DNS doesn't work
-                "https://hrf.org" // Started returning Forbidden
+                "https://hrf.org", // Started returning Forbidden
+                "https://x.com" // Fail on CI
             };
 
             foreach (var match in regex.Matches(text).OfType<Match>())
@@ -515,7 +518,7 @@ retry:
             EqualJsContent(expected, actual);
 
             // This test is flaky probably because of the CDN sending the wrong file's version in some regions.
-            // https://app.circleci.com/pipelines/github/btcpayserver/btcpayserver/13750/workflows/44aaf31d-0057-4fd8-a5bb-1a2c47fc530f/jobs/42963
+            // Observed in CI: the CDN can serve the wrong file version in some regions.
             // It works locally depending on where you live.
 
             //actual = GetFileContent("BTCPayServer", "wwwroot", "vendor", "dom-confetti", "dom-confetti.min.js").Trim();
@@ -554,6 +557,10 @@ retry:
 
             actual = GetFileContent("BTCPayServer", "wwwroot", "vendor", "bbqr", "bbqr.iife.js").Trim();
             expected = (await (await client.GetAsync($"https://cdn.jsdelivr.net/npm/bbqr@1.0.0/dist/bbqr.iife.js")).Content.ReadAsStringAsync()).Trim();
+            EqualJsContent(expected, actual);
+
+            actual = GetFileContent("BTCPayServer", "wwwroot", "vendor", "fuse.js", "fuse.min.js").Trim();
+            expected = (await (await client.GetAsync($"https://unpkg.com/fuse.js@6.6.2/dist/fuse.min.js")).Content.ReadAsStringAsync()).Trim();
             EqualJsContent(expected, actual);
         }
 
@@ -635,9 +642,9 @@ retry:
             string currency = "USD")
         {
             var storeController = user.GetController<UIStoresController>();
-            var vm = (RatesViewModel)((ViewResult)await storeController.Rates()).Model;
+            var vm = await storeController.Rates().AssertViewModelAsync<RatesViewModel>();
             vm.PrimarySource.PreferredExchange = exchange;
-            await storeController.Rates(vm);
+            await storeController.Rates(vm,vm.StoreId);
             var invoice2 = await user.BitPay.CreateInvoiceAsync(
                 new Invoice()
                 {

@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-FILTERS=" "
-if [ ! -z "$TEST_FILTERS" ]; then
-FILTERS="--filter $TEST_FILTERS"
+set --
+if [ -n "${TEST_FILTERS:-}" ]; then
+set -- --filter "$TEST_FILTERS"
 fi
 
-dotnet test -c ${CONFIGURATION_NAME} $FILTERS --no-build -v n --logger "console;verbosity=normal" < /dev/null
+dotnet "bin/${CONFIGURATION_NAME}/net10.0/BTCPayServer.Tests.dll" "$@" --output Detailed --show-stdout Failed --show-stderr Failed --progress on --ansi off --report-gh --xunit-diagnostics on --long-running 180

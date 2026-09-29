@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Encodings.Web;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
@@ -11,13 +12,11 @@ using BTCPayServer.Fido2;
 using BTCPayServer.Models.ManageViewModels;
 using BTCPayServer.Security.Greenfield;
 using BTCPayServer.Services;
-using BTCPayServer.Plugins.Emails.Services;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Rendering;
-using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging;
 
@@ -29,7 +28,6 @@ namespace BTCPayServer.Controllers
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
-        private readonly EmailSenderFactory _EmailSenderFactory;
         private readonly ILogger _logger;
         private readonly UrlEncoder _urlEncoder;
         private readonly BTCPayServerEnvironment _btcPayServerEnvironment;
@@ -42,13 +40,13 @@ namespace BTCPayServer.Controllers
         private readonly UriResolver _uriResolver;
         private readonly IFileService _fileService;
         private readonly EventAggregator _eventAggregator;
+        private readonly PermissionService _permissionService;
         readonly StoreRepository _StoreRepository;
         public IStringLocalizer StringLocalizer { get; }
 
         public UIManageController(
           UserManager<ApplicationUser> userManager,
           SignInManager<ApplicationUser> signInManager,
-          EmailSenderFactory emailSenderFactory,
           ILogger<UIManageController> logger,
           UrlEncoder urlEncoder,
           StoreRepository storeRepository,
@@ -62,11 +60,11 @@ namespace BTCPayServer.Controllers
           IFileService fileService,
           IStringLocalizer stringLocalizer,
           IHtmlHelper htmlHelper,
-          EventAggregator eventAggregator)
+          EventAggregator eventAggregator,
+          PermissionService permissionService)
         {
             _userManager = userManager;
             _signInManager = signInManager;
-            _EmailSenderFactory = emailSenderFactory;
             _logger = logger;
             _urlEncoder = urlEncoder;
             _btcPayServerEnvironment = btcPayServerEnvironment;
@@ -81,6 +79,7 @@ namespace BTCPayServer.Controllers
             _fileService = fileService;
             _StoreRepository = storeRepository;
             StringLocalizer = stringLocalizer;
+            _permissionService = permissionService;
         }
 
         [HttpGet]
@@ -88,19 +87,35 @@ namespace BTCPayServer.Controllers
         {
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
+                return NotFound();
+            return View(await GetIndexViewModel(user));
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> TwoFactorAuthentication()
+        {
+            var user = await _userManager.GetUserAsync(User);
+            if (user == null)
+                return NotFound();
+
+            var model = new TwoFactorAuthenticationViewModel
             {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
-            var blob = user.GetBlob() ?? new();
-            var model = new IndexViewModel
-            {
-                Email = user.Email,
-                Name = blob.Name,
-                ImageUrl = string.IsNullOrEmpty(blob.ImageUrl) ? null : await _uriResolver.Resolve(Request.GetAbsoluteRootUri(), UnresolvedUri.Create(blob.ImageUrl)),
-                EmailConfirmed = user.EmailConfirmed,
-                RequiresEmailConfirmation = user.RequiresEmailConfirmation
+                IsAuthenticatorEnabled = await _userManager.IsAuthenticatorConfigured(user),
+                Credentials = await _fido2Service.GetCredentials(user.Id)
             };
+
             return View(model);
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> Passkeys()
+        {
+            var user = await _userManager.GetUserAsync(User);
+            if (user == null)
+                return NotFound();
+
+            var credentials = await _fido2Service.GetCredentials(user.Id);
+            return View(credentials.Where(c => c.Type == Fido2Credential.CredentialType.Passkey).ToList());
         }
 
         [HttpPost]
@@ -110,9 +125,7 @@ namespace BTCPayServer.Controllers
 
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var blob = user.GetBlob() ?? new();
             blob.ShowInvoiceStatusChangeHint = false;
@@ -127,13 +140,19 @@ namespace BTCPayServer.Controllers
         {
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             bool needUpdate = false;
             var email = user.Email;
-            if (model.Email != email)
+            var setNewEmail = model.Email != email && ModelState.IsValid;
+            if (setNewEmail && (string.IsNullOrEmpty(model.CurrentPassword) ||
+                                !await _userManager.CheckPasswordAsync(user, model.CurrentPassword)))
+            {
+                ModelState.AddModelError(nameof(model.CurrentPassword), StringLocalizer["The current password is not correct."].Value);
+                return View(await GetIndexViewModel(user, model));
+            }
+
+            if (setNewEmail)
             {
                 if (!(await _userManager.FindByEmailAsync(model.Email) is null))
                 {
@@ -154,6 +173,12 @@ namespace BTCPayServer.Controllers
             }
 
             var blob = user.GetBlob() ?? new();
+            if (blob.AllowGreenfieldBasicAuth != model.AllowGreenfieldBasicAuth)
+            {
+                blob.AllowGreenfieldBasicAuth = model.AllowGreenfieldBasicAuth;
+                needUpdate = true;
+            }
+
             if (blob.Name != model.Name)
             {
                 blob.Name = model.Name;
@@ -215,9 +240,7 @@ namespace BTCPayServer.Controllers
 
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var callbackUrl = await _callbackGenerator.ForEmailConfirmation(user);
             _eventAggregator.Publish(new UserEvent.ConfirmationEmailRequested(user, callbackUrl));
@@ -230,9 +253,7 @@ namespace BTCPayServer.Controllers
         {
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var hasPassword = await _userManager.HasPasswordAsync(user);
             if (!hasPassword)
@@ -255,9 +276,7 @@ namespace BTCPayServer.Controllers
 
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var changePasswordResult = await _userManager.ChangePasswordAsync(user, model.OldPassword, model.NewPassword);
             if (!changePasswordResult.Succeeded)
@@ -278,9 +297,7 @@ namespace BTCPayServer.Controllers
         {
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var hasPassword = await _userManager.HasPasswordAsync(user);
 
@@ -304,9 +321,7 @@ namespace BTCPayServer.Controllers
 
             var user = await _userManager.GetUserAsync(User);
             if (user == null)
-            {
-                throw new ApplicationException($"Unable to load user with ID '{_userManager.GetUserId(User)}'.");
-            }
+                return NotFound();
 
             var addPasswordResult = await _userManager.AddPasswordAsync(user, model.NewPassword);
             if (!addPasswordResult.Succeeded)
@@ -337,6 +352,21 @@ namespace BTCPayServer.Controllers
         }
 
         #region Helpers
+
+        private async Task<IndexViewModel> GetIndexViewModel(ApplicationUser user, IndexViewModel model = null)
+        {
+            var blob = user.GetBlob() ?? new();
+            model ??= new IndexViewModel
+            {
+                Email = user.Email,
+                Name = blob.Name,
+                AllowGreenfieldBasicAuth = blob.AllowGreenfieldBasicAuth
+            };
+            model.ImageUrl = string.IsNullOrEmpty(blob.ImageUrl) ? null : await _uriResolver.Resolve(Request.GetAbsoluteRootUri(), UnresolvedUri.Create(blob.ImageUrl));
+            model.EmailConfirmed = user.EmailConfirmed;
+            model.RequiresEmailConfirmation = user.RequiresEmailConfirmation;
+            return model;
+        }
 
         private void AddErrors(IdentityResult result)
         {

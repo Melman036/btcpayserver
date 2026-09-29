@@ -1,7 +1,6 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions;
@@ -17,6 +16,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Logging;
+using static BTCPayServer.Events.UserEvent;
 
 namespace BTCPayServer.Services
 {
@@ -27,7 +27,7 @@ namespace BTCPayServer.Services
         private readonly FileService _fileService;
         private readonly EventAggregator _eventAggregator;
         private readonly ApplicationDbContextFactory _applicationDbContextFactory;
-        private readonly BTCPayServerSecurityStampValidator.DisabledUsers _disabledUsers;
+        private readonly BTCPayServerSecurityStampValidator.SecurityStampInvalidator _securityStampInvalidator;
         private readonly IEnumerable<LoginExtension> _loginExtensions;
         private readonly ILogger<UserService> _logger;
 
@@ -37,7 +37,7 @@ namespace BTCPayServer.Services
             FileService fileService,
             EventAggregator eventAggregator,
             ApplicationDbContextFactory applicationDbContextFactory,
-            BTCPayServerSecurityStampValidator.DisabledUsers disabledUsers,
+            BTCPayServerSecurityStampValidator.SecurityStampInvalidator securityStampInvalidator,
             IEnumerable<LoginExtension> loginExtensions,
             ILogger<UserService> logger)
         {
@@ -46,7 +46,7 @@ namespace BTCPayServer.Services
             _fileService = fileService;
             _eventAggregator = eventAggregator;
             _applicationDbContextFactory = applicationDbContextFactory;
-            _disabledUsers = disabledUsers;
+            _securityStampInvalidator = securityStampInvalidator;
             _loginExtensions = loginExtensions;
             _logger = logger;
         }
@@ -71,7 +71,8 @@ namespace BTCPayServer.Services
             string?[] roles,
             CallbackGenerator callbackGenerator,
             UriResolver uriResolver,
-            HttpRequest request) where T : ApplicationUserData, new()
+            HttpRequest request,
+            bool includeInvitationUrl) where T : ApplicationUserData, new()
         {
             var blob = data.GetBlob() ?? new UserBlob();
             return new T
@@ -86,11 +87,12 @@ namespace BTCPayServer.Services
                 Name = blob.Name,
                 Roles = roles,
                 Disabled = data.IsDisabled,
+                StoreQuota = blob.StoreQuota,
+                AllowGreenfieldBasicAuth = blob.AllowGreenfieldBasicAuth,
                 ImageUrl = string.IsNullOrEmpty(blob.ImageUrl)
                     ? null
                     : await uriResolver.Resolve(request.GetAbsoluteRootUri(), UnresolvedUri.Create(blob.ImageUrl)),
-                InvitationUrl = string.IsNullOrEmpty(blob.InvitationToken) ? null
-                    : callbackGenerator.ForInvitation(data.Id, blob.InvitationToken)
+                InvitationUrl = !includeInvitationUrl || string.IsNullOrEmpty(blob.InvitationToken) ? null : callbackGenerator.ForInvitation(data.Id, blob.InvitationToken)
             };
         }
 
@@ -130,7 +132,7 @@ namespace BTCPayServer.Services
             public ApplicationUser User => _user ?? throw new InvalidOperationException("User is not set");
             public List<LoginFailure> Failures { get; } = new();
             /// <summary>
-            /// A redirect URL to redirect the user if login failed.
+            /// A redirect URL to redirect the user if he isn't allowed to login.
             /// </summary>
             public string? FailedRedirectUrl { get; set; }
         }
@@ -181,6 +183,12 @@ namespace BTCPayServer.Services
             var succeeded = await userManager.UpdateAsync(user) is { Succeeded: true };
             if (succeeded)
             {
+                if (!approved)
+                {
+                    await userManager.UpdateSecurityStampAsync(user);
+                    _securityStampInvalidator.Invalidate(user.Id);
+                }
+
                 _logger.LogInformation("User {Email} is now {Status}", user.Email, approved ? "approved" : "unapproved");
                 _eventAggregator.Publish(new UserEvent.Approved(user, loginLink));
             }
@@ -199,7 +207,9 @@ namespace BTCPayServer.Services
             public record Error(IdentityError[] Errors) : SetDisabledResult;
         }
 
-        public async Task<SetDisabledResult> SetDisabled(string userId, bool disabled)
+        public Task<SetDisabledResult> SetDisabled(string userId, bool disabled)
+        => SetDisabled(userId, disabled, null);
+        public async Task<SetDisabledResult> SetDisabled(string userId, bool disabled, string? source)
         {
             using var scope = _serviceProvider.CreateScope();
             var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
@@ -211,21 +221,18 @@ namespace BTCPayServer.Services
 
             var lockedOutDeadline = disabled ? DateTimeOffset.MaxValue : (DateTimeOffset?)null;
             var res = await userManager.SetLockoutEndDateAsync(user, lockedOutDeadline);
-            // Without this, the user won't be logged out automatically when his authentication ticket expires
-            if (disabled)
-            {
-                await userManager.UpdateSecurityStampAsync(user);
-                _disabledUsers.Add(userId);
-            }
-            else
-            {
-                _disabledUsers.Remove(userId);
-            }
 
             if (res.Succeeded)
             {
+                if (disabled)
+                {
+                    await userManager.UpdateSecurityStampAsync(user);
+                    // Force immediate cookie revalidation instead of waiting for the stamp validation interval.
+                    _securityStampInvalidator.Invalidate(user.Id);
+                }
                 await using var ctx = _applicationDbContextFactory.CreateContext();
                 await ctx.Users.UpdateStoreNoActiveUserForUsers([userId]);
+                _eventAggregator.Publish(new UserEvent.DisabledChanged(user, disabled, source));
             }
 
             return res.Succeeded ? new SetDisabledResult.Success() : new SetDisabledResult.Error(res.Errors.ToArray());
@@ -261,6 +268,7 @@ namespace BTCPayServer.Services
 
             if (res.Succeeded)
             {
+                _securityStampInvalidator.Invalidate(user.Id);
                 _logger.LogInformation("Successfully set admin status for user {Email}", user.Email);
             }
             else

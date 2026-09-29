@@ -63,12 +63,17 @@
                                     },
                                     "currentPassword": {
                                         "type": "string",
-                                        "description": "The current password of the user",
+                                        "description": "The current password of the user. Required when changing the email or the password.",
                                         "nullable": true
                                     },
                                     "newPassword": {
                                         "type": "string",
                                         "description": "The new password of the user",
+                                        "nullable": true
+                                    },
+                                    "allowGreenfieldBasicAuth": {
+                                        "type": "boolean",
+                                        "description": "Whether to allow Basic authentication for the Greenfield API",
                                         "nullable": true
                                     }
                                 }
@@ -86,6 +91,16 @@
                             "application/json": {
                                 "schema": {
                                     "$ref": "#/components/schemas/ApplicationUserData"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Unable to validate the request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationProblemDetails"
                                 }
                             }
                         }
@@ -547,6 +562,11 @@
                         "type": "boolean",
                         "description": "True if the instance requires approval to log in"
                     },
+                    "storeQuota": {
+                        "type": "number",
+                        "nullable": true,
+                        "description": "Per-user override for the max number of stores this user can create. Null means the server default applies"
+                    },
                     "created": {
                         "type": "number",
                         "nullable": true,
@@ -560,6 +580,10 @@
                     "disabled": {
                         "type": "boolean",
                         "description": "True if an admin has disabled the user"
+                    },
+                    "allowGreenfieldBasicAuth": {
+                        "type": "boolean",
+                        "description": "Whether Basic authentication is allowed for the Greenfield API"
                     },
                     "roles": {
                         "type": "array",

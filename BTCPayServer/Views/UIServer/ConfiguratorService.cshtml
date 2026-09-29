@@ -1,19 +1,12 @@
 ﻿@model LightningWalletServices
 @{
     ViewData.SetLayoutModel(new(nameof(ServerNavPages.Services), StringLocalizer["BTCPay Server Configurator"]));
+    ViewData.SetBreadcrumbs([new(StringLocalizer["Services"], Action: nameof(BTCPayServer.Controllers.UIServerController.Services))]);
 }
 
 
 <div class="sticky-header">
-    <nav aria-label="breadcrumb">
-        <ol class="breadcrumb">
-            <li class="breadcrumb-item">
-                <a asp-action="Services" text-translate="true">Services</a>
-            </li>
-            <li class="breadcrumb-item active" aria-current="page">@ViewData["Title"]</li>
-        </ol>
-        <h2>@ViewData["Title"]</h2>
-    </nav>
+    <vc:title-header />
 </div>
 <partial name="_StatusMessage" />
 
@@ -25,14 +18,16 @@
 
 <div class="row">
     <div class="col-md-8">
+        <div class="settings-section">
         <div class="form-group">
-            <p text-translate="true">This page exposes information to use the configured BTCPay Server Configurator to modify this setup.</p>
+            <p class="mb-0" text-translate="true">This page exposes information to use the configured BTCPay Server Configurator to modify this setup.</p>
         </div>
 
-        <a href="@Model.ServiceLink" target="_blank" class="form-group" rel="noreferrer noopener">
+        <a href="@Model.ServiceLink" target="_blank" class="form-group mb-0" rel="noreferrer noopener">
             <label asp-for="ServiceLink" class="form-label" text-translate="true">Service</label>
             <input asp-for="ServiceLink" class="form-control" readonly />
         </a>
+        </div>
     </div>
 </div>
 

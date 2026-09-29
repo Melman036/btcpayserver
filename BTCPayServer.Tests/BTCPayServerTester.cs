@@ -9,12 +9,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Contracts;
+using BTCPayServer.Client;
 using BTCPayServer.Configuration;
-using BTCPayServer.Controllers;
 using BTCPayServer.Hosting;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Bitcoin;
 using BTCPayServer.Rating;
+using BTCPayServer.Security.Greenfield;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
@@ -25,26 +26,43 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ApplicationParts;
+using Microsoft.AspNetCore.Session;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBXplorer;
 
 namespace BTCPayServer.Tests
 {
-    public class BTCPayServerTester : IDisposable
+    public class BTCPayServerTester : IDisposable, IAsyncDisposable
     {
         internal readonly string _Directory;
         public ILoggerProvider LoggerProvider { get; }
-
+        public bool? BindAllInterfaces { get; set; }
         ILog TestLogs;
+        readonly CancellationToken _lifetimeToken;
+        readonly CancellationTokenRegistration _cancellationRegistration;
+        readonly TaskCompletionSource _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int _disposed;
+
         public BTCPayServerTester(ILog testLogs, ILoggerProvider loggerProvider, string scope)
+            : this(testLogs, loggerProvider, scope, CancellationToken.None)
+        {
+        }
+
+        public BTCPayServerTester(ILog testLogs, ILoggerProvider loggerProvider, string scope,
+            CancellationToken cancellationToken)
         {
             this.LoggerProvider = loggerProvider;
             this.TestLogs = testLogs;
             this._Directory = scope ?? throw new ArgumentNullException(nameof(scope));
+            _lifetimeToken = cancellationToken;
+            _cancellationRegistration = cancellationToken.Register(static state =>
+                _ = ((BTCPayServerTester)state).DisposeCoreAsync(true), this);
         }
 
         public Uri NBXplorerUri
@@ -75,7 +93,7 @@ namespace BTCPayServer.Tests
             get; set;
         }
 
-        IWebHost _Host;
+        IHost _Host;
         public int Port
         {
             get; set;
@@ -103,6 +121,9 @@ namespace BTCPayServer.Tests
         public bool DisableRegistration { get; set; } = false;
         public async Task StartAsync()
         {
+            _lifetimeToken.ThrowIfCancellationRequested();
+            if (_Host is not null)
+                return;
             if (!Directory.Exists(_Directory))
                 Directory.CreateDirectory(_Directory);
             string chain = NBXplorerDefaultSettings.GetFolderName(ChainName.Regtest);
@@ -111,10 +132,16 @@ namespace BTCPayServer.Tests
                 Directory.CreateDirectory(chainDirectory);
 
             StringBuilder config = new StringBuilder();
-            config.AppendLine($"{chain.ToLowerInvariant()}=1");
-            if (InContainer)
+            if (string.Equals(Environment.GetEnvironmentVariable("BTCPAY_NODEFAULTCHAIN"), "true", StringComparison.OrdinalIgnoreCase))
             {
-                config.AppendLine($"bind=0.0.0.0");
+                Chains = new HashSet<string> { "none" };
+                config.AppendLine("nodefaultchain=true");
+            }
+
+            config.AppendLine($"{chain.ToLowerInvariant()}=1");
+            if (BindAllInterfaces ?? InContainer)
+            {
+                config.AppendLine("bind=0.0.0.0");
             }
             config.AppendLine($"port={Port}");
             config.AppendLine($"chains={string.Join(',', Chains)}");
@@ -124,11 +151,12 @@ namespace BTCPayServer.Tests
                 config.AppendLine($"btc.explorer.cookiefile=0");
             }
 
+            var btcpayserverTestDataDir = Path.Combine(TestUtils.TryGetSolutionDirectoryInfo().FullName,"BTCPayServer.Tests", "TestData");
             if (UseLightning)
             {
                 config.AppendLine($"btc.lightning={IntegratedLightning}");
                 var localLndBackupFile = Path.Combine(_Directory, "walletunlock.json");
-                File.Copy(TestUtils.GetTestDataFullPath("LndSeedBackup/walletunlock.json"), localLndBackupFile, true);
+                File.Copy(Path.Combine(btcpayserverTestDataDir, "LndSeedBackup/walletunlock.json"), localLndBackupFile, true);
                 config.AppendLine($"btc.external.lndseedbackup={localLndBackupFile}");
             }
 
@@ -145,17 +173,15 @@ namespace BTCPayServer.Tests
             if (CheatMode)
                 config.AppendLine("cheatmode=1");
 
-            config.AppendLine($"torrcfile={TestUtils.GetTestDataFullPath("Tor/torrc")}");
+            config.AppendLine($"torrcfile={Path.Combine(btcpayserverTestDataDir, "Tor/torrc")}");
             config.AppendLine($"socksendpoint={SocksEndpoint}");
             config.AppendLine($"debuglog=debug.log");
             config.AppendLine($"nocsp={NoCSP.ToString().ToLowerInvariant()}");
-
-            if (!string.IsNullOrEmpty(SSHPassword) && string.IsNullOrEmpty(SSHKeyFile))
-                config.AppendLine($"sshpassword={SSHPassword}");
-            if (!string.IsNullOrEmpty(SSHKeyFile))
-                config.AppendLine($"sshkeyfile={SSHKeyFile}");
-            if (!string.IsNullOrEmpty(SSHConnection))
-                config.AppendLine($"sshconnection={SSHConnection}");
+            if (btcpayHostExecutable is not null)
+            {
+                config.AppendLine($"btcpayhostexecutable={btcpayHostExecutable}");
+                config.AppendLine("btcpayhostenabled=true");
+            }
 
             if (!String.IsNullOrEmpty(Postgres))
                 config.AppendLine($"postgres=" + Postgres);
@@ -163,7 +189,7 @@ namespace BTCPayServer.Tests
             if (!string.IsNullOrEmpty(ExplorerPostgres))
                 config.AppendLine($"explorer.postgres=" + ExplorerPostgres);
             var confPath = Path.Combine(chainDirectory, "settings.config");
-            await File.WriteAllTextAsync(confPath, config.ToString());
+            await File.WriteAllTextAsync(confPath, config.ToString(), _lifetimeToken);
 
             ServerUri = new Uri("http://" + HostName + ":" + Port + "/");
             ServerUriWithIP = new Uri("http://127.0.0.1:" + Port + "/");
@@ -176,39 +202,73 @@ namespace BTCPayServer.Tests
 #if DEBUG
             confBuilder.AddJsonFile("appsettings.dev.json", true, false);
 #endif
+
             if (LoadPluginsInDefaultAssemblyContext)
                 confBuilder.AddInMemoryCollection([new("TEST_RUNNER_ENABLED", "true")]);
             var conf = confBuilder.Build();
-            _Host = new WebHostBuilder()
-                    .UseDefaultServiceProvider(options =>
-                    {
-                        options.ValidateScopes = true;
-                    })
-                    .UseConfiguration(conf)
-                    .UseContentRoot(FindBTCPayServerDirectory())
-                    .UseWebRoot(Path.Combine(FindBTCPayServerDirectory(), "wwwroot"))
-                    .ConfigureServices(s =>
-                    {
-                        s.AddLogging(l =>
-                        {
-                            l.AddFilter("System.Net.Http.HttpClient", LogLevel.Critical);
-                            l.SetMinimumLevel(LogLevel.Information)
-                            .AddFilter("Microsoft", LogLevel.Error)
-                            .AddFilter("Microsoft.EntityFrameworkCore.Migrations", LogLevel.Information)
-                            .AddFilter("Fido2NetLib.DistributedCacheMetadataService", LogLevel.Error)
-                            .AddProvider(LoggerProvider);
-                        });
-                    })
-                    .ConfigureServices(services =>
-                    {
-                        services.TryAddSingleton<IFeeProviderFactory>(new BTCPayServer.Services.Fees.FixedFeeProvider(new FeeRate(100L, 1)));
-                    })
-                    .UseKestrel()
-                    .UseStartup<Startup>()
-                    .Build();
-            await _Host.StartWithTasksAsync();
+            _Host = Host.CreateDefaultBuilder()
+                .UseDefaultServiceProvider(options =>
+                {
+                    options.ValidateScopes = true;
+                })
+                .ConfigureAppConfiguration((hostingContext, configBuilder) =>
+                {
+                    configBuilder.AddConfiguration(conf);
+                })
+                .ConfigureLogging(logging =>
+                {
+                    // This matches your logging setup more directly than services.AddLogging(...)
+                    logging.ClearProviders(); // optional: keep if you want full control
 
-            var urls = _Host.ServerFeatures.Get<IServerAddressesFeature>().Addresses;
+                    logging.SetMinimumLevel(LogLevel.Information);
+                    logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Critical);
+                    logging.AddFilter("Microsoft", LogLevel.Error);
+                    logging.AddFilter("Microsoft.EntityFrameworkCore.Migrations", LogLevel.Information);
+                    logging.AddFilter("Fido2NetLib.DistributedCacheMetadataService", LogLevel.Error);
+                    logging.AddFilter("BTCPayServer.Security", LogLevel.Warning);
+
+                    // If LoggerProvider is an ILoggerProvider instance:
+                    logging.ClearProviders();
+                    logging.AddProvider(LoggerProvider);
+
+                    // If you removed ClearProviders(), also add back defaults you want (Console/EventSource/etc.)
+                    // logging.AddConsole();
+                    // logging.AddDebug();
+                })
+                .ConfigureSerilog(conf)
+                .ConfigureWebHostDefaults(webBuilder =>
+                {
+                    var root = FindBTCPayServerDirectory();
+
+                    webBuilder
+                        .UseContentRoot(root)
+                        .UseWebRoot(Path.Combine(root, "wwwroot"))
+                        .UseKestrel()
+                        .UseStartup<Startup>()
+                        .ConfigureServices(services =>
+                        {
+                            if (RuntimeCompilation)
+                                services.AddMvcCore().AddRazorRuntimeCompilation();
+
+                            services.AddMvcCore().ConfigureApplicationPartManager(apm =>
+                            {
+                                var assembly = typeof(BTCPayServerTester).Assembly;
+                                apm.ApplicationParts.Add(new AssemblyPart(assembly));
+                            }).AddControllersAsServices();
+                            services.TryAddSingleton<IFeeProviderFactory>(
+                                new BTCPayServer.Services.Fees.FixedFeeProvider(new FeeRate(100L, 1)));
+                        });
+                })
+                .UseEnvironment(HostEnvironment)
+                .Build();
+            if (_lifetimeToken.IsCancellationRequested)
+            {
+                Interlocked.Exchange(ref _Host, null)?.Dispose();
+                _lifetimeToken.ThrowIfCancellationRequested();
+            }
+            await _Host.StartWithTasksAsync(_lifetimeToken);
+
+            var urls = _Host.GetServerFeatures<IServerAddressesFeature>().Addresses;
             foreach (var url in urls)
             {
                 TestLogs.LogInformation("Listening on " + url);
@@ -273,6 +333,8 @@ namespace BTCPayServer.Tests
             TestLogs.LogInformation("Site is now operational");
         }
         MockRateProvider coinAverageMock;
+        public string btcpayHostExecutable;
+
         private async Task WaitSiteIsOperational()
         {
             // Opportunistic call to wake up view compilation in debug mode, we don't need to await.
@@ -340,12 +402,11 @@ namespace BTCPayServer.Tests
 
         public IServiceProvider ServiceProvider => _Host.Services;
 
-        public string SSHPassword { get; internal set; }
-        public string SSHKeyFile { get; internal set; }
-        public string SSHConnection { get; set; }
         public bool NoCSP { get; set; }
+        public string HostEnvironment { get; set; } = Environments.Development;
+        public bool RuntimeCompilation { get; set; }
 
-        public T GetController<T>(string userId = null, string storeId = null, bool isAdmin = false) where T : Controller
+        public T GetController<T>(string userId = null, string storeId = null, bool isAdmin = false) where T : ControllerBase
         {
             var context = new DefaultHttpContext();
             context.Request.Host = new HostString("127.0.0.1", Port);
@@ -357,6 +418,8 @@ namespace BTCPayServer.Tests
                 claims.Add(new Claim(ClaimTypes.NameIdentifier, userId));
                 if (isAdmin)
                     claims.Add(new Claim(ClaimTypes.Role, Roles.ServerAdmin));
+                claims.Add(new Claim(GreenfieldConstants.ClaimTypes.Permission,
+                    Permission.Create(Policies.Unrestricted).ToString()));
                 context.User = new ClaimsPrincipal(new ClaimsIdentity(claims.ToArray(), AuthenticationSchemes.Cookie));
             }
             if (storeId != null)
@@ -369,6 +432,7 @@ namespace BTCPayServer.Tests
 
             var httpAccessor = provider.GetRequiredService<IHttpContextAccessor>();
             httpAccessor.HttpContext = context;
+            context.Session = provider.GetRequiredService<ISessionStore>().Create("Dummy", TimeSpan.MaxValue, TimeSpan.MaxValue, () => true, true);
 
             var controller = (T)ActivatorUtilities.CreateInstance(provider, typeof(T));
 
@@ -382,8 +446,69 @@ namespace BTCPayServer.Tests
 
         public void Dispose()
         {
-            if (_Host != null)
-                _Host.Dispose();
+            DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _cancellationRegistration.Dispose();
+            _ = DisposeCoreAsync(false);
+            await _disposeCompletion.Task.ConfigureAwait(false);
+        }
+
+        async Task DisposeCoreAsync(bool abort)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            try
+            {
+                var host = Interlocked.Exchange(ref _Host, null);
+                if (host is null)
+                {
+                    _disposeCompletion.TrySetResult();
+                    return;
+                }
+
+                if (abort)
+                {
+                    TestLogs.LogInformation("Aborting BTCPay Server test host...");
+                    try
+                    {
+                        await host.ForceStop();
+                    }
+                    catch (Exception ex)
+                    {
+                        TestLogs.LogInformation($"BTCPay Server test host abort failed: {ex.Message}");
+                    }
+                    finally
+                    {
+                        host.Dispose();
+                    }
+                }
+                else
+                {
+
+                    try
+                    {
+                        await host.ForceStop();
+                        TestLogs.LogInformation("BTCPay Server test host stopped");
+                    }
+                    catch (Exception ex)
+                    {
+                        TestLogs.LogInformation($"BTCPay Server test host did not stop. ({ex.Message})");
+                    }
+                    finally
+                    {
+                        host.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _disposeCompletion.TrySetException(ex);
+                return;
+            }
+            _disposeCompletion.TrySetResult();
         }
 
         public void ChangeRate(string pair, BidAsk bidAsk)

@@ -1,17 +1,19 @@
 @model BTCPayServer.Models.InvoicingModels.InvoiceReceiptViewModel
 @using BTCPayServer.Client.Models
-@using BTCPayServer.Components.QRCode
 @using BTCPayServer.Services
+@using BTCPayServer.Plugins.Translations
 @inject DisplayFormatter DisplayFormatter
+@inject LocalizerService LocalizerService
 @{
     Layout = null;
-    ViewData["Title"] = $"Receipt from {Model.StoreName}";
+    ViewData.SetTitle($"Receipt from {Model.StoreName}");
     var isProcessing = Model.Status == InvoiceStatus.Processing;
-    var isFreeInvoice = (Model.Status == InvoiceStatus.New && Model.Amount == 0);
+    var isFreeInvoice = (Model.Status == InvoiceStatus.New && Model.InvoiceAmount == 0);
     var isSettled = Model.Status == InvoiceStatus.Settled;
+    var isRtl = LocalizerService.IsRtl;
 }
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en"@(isRtl ? " dir=\"rtl\"" : "")>
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -19,10 +21,20 @@
     <meta name="robots" content="noindex">
     <title>@ViewData["Title"]</title>
     @* CSS *@
-    <link href="~/main/bootstrap/bootstrap.css" asp-append-version="true" rel="stylesheet" />
-    <link href="~/main/fonts/OpenSans.css" asp-append-version="true" rel="stylesheet" />
-    <link href="~/main/layout.css" asp-append-version="true" rel="stylesheet" />
-    <link href="~/main/site.css" asp-append-version="true" rel="stylesheet" />
+    @if (isRtl)
+    {
+        <link href="~/main/bootstrap/bootstrap.rtl.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/fonts/OpenSans.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/rtl/layout.rtl.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/rtl/site.rtl.css" asp-append-version="true" rel="stylesheet" />
+    }
+    else
+    {
+        <link href="~/main/bootstrap/bootstrap.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/fonts/OpenSans.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/layout.css" asp-append-version="true" rel="stylesheet" />
+        <link href="~/main/site.css" asp-append-version="true" rel="stylesheet" />
+    }
     <link href="~/main/themes/default.css" asp-append-version="true" rel="stylesheet" />
     <meta name="robots" content="noindex,nofollow">
     @if (isProcessing)
@@ -70,6 +82,7 @@
             margin-bottom: 0px;
         }
     </style>
+    <vc:declare-date-formatter-options></vc:declare-date-formatter-options>
 </head>
 
 <body class="m-0 p-0 bg-white">
@@ -131,7 +144,7 @@
                         {
                             @foreach (var value in cartCollection)
                             {
-                                <tr>
+                                <tr class="cart-data">
                                     <td class="val text-end">@value</td>
                                 </tr>
                             }
@@ -172,6 +185,13 @@
                                 <td class="val text-end">@posData.Tip</td>
                             </tr>
                         }
+						@if (posData.TaxOnTip != null)
+						{
+							<tr class="sums-data">
+								<td class="key text-secondary">Tax on tip</td>
+								<td class="val text-end">@posData.TaxOnTip</td>
+							</tr>
+						}
                         @if (posData.Total != null)
                         {
                             <tr>
@@ -187,7 +207,14 @@
                     {
                         <tr class="sums-data">
                             <td class="key text-nowrap text-secondary">Total</td>
-                            <td class="val text-end fw-semibold">@DisplayFormatter.Currency(Model.Amount, Model.Currency, DisplayFormatter.CurrencyFormat.Symbol)</td>
+                            <td class="val text-end fw-semibold">@DisplayFormatter.Currency(Model.InvoiceAmount, Model.Currency, DisplayFormatter.CurrencyFormat.Symbol)</td>
+                        </tr>
+                    }
+                    @if (Model.IsOverpaid)
+                    {
+                        <tr class="invoice-summary__amount-paid">
+                            <td class="key text-nowrap text-secondary">Amount paid</td>
+                            <td class="val text-end fw-semibold">@DisplayFormatter.Currency(Model.PaidAmount, Model.Currency, DisplayFormatter.CurrencyFormat.Symbol)</td>
                         </tr>
                     }
                     @if (Model.Payments?.Any() is true)
@@ -260,7 +287,7 @@
         }
     </div>
     <div class="store-footer p-3">
-        <a class="store-powered-by" style="color:#000;"><span text-translate="true">Powered by</span> <partial name="_StoreFooterLogo" /></a>
+        <a class="store-powered-by" href="https://btcpayserver.org" target="_blank" rel="noreferrer noopener" style="color:#000;"><span text-translate="true">Powered by</span> <partial name="_StoreFooterLogo" /></a>
     </div>
     <hr class="w-100 my-0 bg-none"/>
 </center>

@@ -44,13 +44,20 @@ public partial class BTCPayServerClient
 
     public virtual async Task<AppBaseData[]> GetAllApps(CancellationToken token = default)
     {
-        return await SendHttpRequest<AppBaseData[]>("api/v1/apps", null, HttpMethod.Get, token);
+        return await SendHttpRequest<AppBaseData[]>($"api/v1/apps", null, HttpMethod.Get, token);
     }
 
     public virtual async Task<PointOfSaleAppData> GetPosApp(string appId, CancellationToken token = default)
     {
         if (appId == null) throw new ArgumentNullException(nameof(appId));
         return await SendHttpRequest<PointOfSaleAppData>($"api/v1/apps/pos/{appId}", null, HttpMethod.Get, token);
+    }
+
+    public virtual async Task<CrowdfundAppData> UpdateCrowdfundApp(string appId,
+        CrowdfundAppRequest request, CancellationToken token = default)
+    {
+        if (request == null) throw new ArgumentNullException(nameof(request));
+        return await SendHttpRequest<CrowdfundAppData>($"api/v1/apps/crowdfund/{appId}", request, HttpMethod.Put, token);
     }
 
     public virtual async Task<CrowdfundAppData> GetCrowdfundApp(string appId, CancellationToken token = default)

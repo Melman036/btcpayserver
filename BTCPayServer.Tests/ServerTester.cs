@@ -22,18 +22,33 @@ using BTCPayServer.Services;
 
 namespace BTCPayServer.Tests
 {
-    public class ServerTester : IDisposable
+    public class ServerTester : IDisposable, IAsyncDisposable
     {
         public const string DefaultConnectionString = "User ID=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=btcpayserver";
         public (string Hostname, int SmtpPort, int HttpPort) MailPitSettings { get; set; }
         public List<IDisposable> Resources = new List<IDisposable>();
         readonly string _Directory;
+        readonly CancellationTokenSource _lifetimeCancellation;
+        readonly TaskCompletionSource _disposeCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int _disposed;
+
+        public CancellationToken LifetimeToken => _lifetimeCancellation.Token;
 
         public ILoggerProvider LoggerProvider { get; }
 
         internal ILog TestLogs;
-        public ServerTester(string scope, bool newDb, ILog testLogs, ILoggerProvider loggerProvider, BTCPayNetworkProvider networkProvider)
+        public ServerTester(string scope, bool newDb, ILog testLogs, ILoggerProvider loggerProvider,
+            BTCPayNetworkProvider networkProvider)
+            : this(scope, newDb, testLogs, loggerProvider, networkProvider, CancellationToken.None,
+                Timeout.InfiniteTimeSpan)
         {
+        }
+
+        public ServerTester(string scope, bool newDb, ILog testLogs, ILoggerProvider loggerProvider,
+            BTCPayNetworkProvider networkProvider, CancellationToken cancellationToken, TimeSpan timeout)
+        {
+            _lifetimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _lifetimeCancellation.CancelAfter(timeout);
             Scope = scope;
             LoggerProvider = loggerProvider;
             this.TestLogs = testLogs;
@@ -49,19 +64,23 @@ namespace BTCPayServer.Tests
                 int.Parse(GetEnvironment("TESTS_MAILPIT_HTTP", "34218")));
             TestLogs.LogInformation($"MailPit settings: http://{MailPitSettings.Hostname}:{MailPitSettings.HttpPort} (SMTP: {MailPitSettings.SmtpPort})");
             _NetworkProvider = networkProvider;
-            ExplorerNode = new RPCClient(RPCCredentialString.Parse(GetEnvironment("TESTS_BTCRPCCONNECTION", "server=http://127.0.0.1:43782;ceiwHEbqWI83:DwubwWsoo3")), NetworkProvider.GetNetwork<BTCPayNetwork>("BTC").NBitcoinNetwork);
-            ExplorerNode.ScanRPCCapabilities();
-
-            ExplorerClient = new ExplorerClient(NetworkProvider.GetNetwork<BTCPayNetwork>("BTC").NBXplorerNetwork, new Uri(GetEnvironment("TESTS_BTCNBXPLORERURL", "http://127.0.0.1:32838/")));
-
-            PayTester = new BTCPayServerTester(TestLogs, LoggerProvider, Path.Combine(_Directory, "pay"))
+            var noDefaultNode = bool.Parse(GetEnvironment("BTCPAY_NODEFAULTCHAIN", "false"));
+            if (!noDefaultNode)
             {
-                NBXplorerUri = ExplorerClient.Address,
+                ExplorerNode = new RPCClient(RPCCredentialString.Parse(GetEnvironment("TESTS_BTCRPCCONNECTION", "server=http://127.0.0.1:43782;ceiwHEbqWI83:DwubwWsoo3")), NetworkProvider.GetNetwork<BTCPayNetwork>("BTC").NBitcoinNetwork);
+                ExplorerNode.ScanRPCCapabilities();
+
+                ExplorerClient = new ExplorerClient(NetworkProvider.GetNetwork<BTCPayNetwork>("BTC").NBXplorerNetwork, new Uri(GetEnvironment("TESTS_BTCNBXPLORERURL", "http://127.0.0.1:32838/")));
+            }
+
+            PayTester = new BTCPayServerTester(TestLogs, LoggerProvider, Path.Combine(_Directory, "pay"), LifetimeToken)
+            {
+                NBXplorerUri = !noDefaultNode ? ExplorerClient.Address : null,
                 // TODO: The fact that we use same conn string as development database can cause huge problems with tests
                 // since in dev we already can have some users / stores registered, while on CI database is being initalized
                 // for the first time and first registered user gets admin status by default
                 Postgres = GetEnvironment("TESTS_POSTGRES", DefaultConnectionString),
-                ExplorerPostgres = GetEnvironment("TESTS_EXPLORER_POSTGRES", "User ID=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=nbxplorer"),
+                ExplorerPostgres = !noDefaultNode ? GetEnvironment("TESTS_EXPLORER_POSTGRES", "User ID=postgres;Include Error Detail=true;Host=127.0.0.1;Port=39372;Database=nbxplorer") : null
             };
             if (newDb)
             {
@@ -73,9 +92,6 @@ namespace BTCPayServer.Tests
             PayTester.HostName = GetEnvironment("TESTS_HOSTNAME", "127.0.0.1");
             PayTester.InContainer = bool.Parse(GetEnvironment("TESTS_INCONTAINER", "false"));
 
-            PayTester.SSHPassword = GetEnvironment("TESTS_SSHPASSWORD", "opD3i2282D");
-            PayTester.SSHKeyFile = GetEnvironment("TESTS_SSHKEYFILE", "");
-            PayTester.SSHConnection = GetEnvironment("TESTS_SSHCONNECTION", "root@127.0.0.1:21622");
             PayTester.SocksEndpoint = GetEnvironment("TESTS_SOCKSENDPOINT", "localhost:9050");
         }
 
@@ -105,25 +121,24 @@ namespace BTCPayServer.Tests
 
         public void ActivateLightning()
         {
-            ActivateLightning(LightningConnectionType.CLightning);
+            ActivateLightning(LightningTestImplementation.CoreLightning);
         }
-        public void ActivateLightning(string internalNode)
+        public void ActivateLightning(LightningTestImplementation internalNode)
         {
             var btc = NetworkProvider.GetNetwork<BTCPayNetwork>("BTC").NBitcoinNetwork;
             var factory = new LightningClientFactory(btc);
             CustomerLightningD = factory.Create(GetEnvironment("TEST_CUSTOMERLIGHTNINGD", "type=clightning;server=tcp://127.0.0.1:30992/"));
             MerchantLightningD = factory.Create(GetEnvironment("TEST_MERCHANTLIGHTNINGD", "type=clightning;server=tcp://127.0.0.1:30993/"));
-            MerchantCharge = new ChargeTester(this, "TEST_MERCHANTCHARGE", "type=charge;server=http://127.0.0.1:54938/;api-token=foiewnccewuify;allowinsecure=true", "merchant_lightningd", btc);
             MerchantLnd = new LndMockTester(this, "TEST_MERCHANTLND", "http://lnd:lnd@127.0.0.1:35531/", "merchant_lnd", btc);
             PayTester.UseLightning = true;
             PayTester.IntegratedLightning = GetLightningConnectionString(internalNode, true);
         }
-        public string GetLightningConnectionString(string connectionType, bool isMerchant)
+        public string GetLightningConnectionString(LightningTestImplementation connectionType, bool isMerchant)
         {
             string connectionString = null;
-            if (connectionType is null)
+            if (connectionType is LightningTestImplementation.Internal)
                 return LightningPaymentMethodConfig.InternalNode;
-            if (connectionType == LightningConnectionType.CLightning)
+            if (connectionType == LightningTestImplementation.CoreLightning)
             {
                 if (isMerchant)
                     connectionString = "type=clightning;server=" +
@@ -132,7 +147,7 @@ namespace BTCPayServer.Tests
                     connectionString = "type=clightning;server=" +
                                    ((CLightningClient)CustomerLightningD).Address.AbsoluteUri;
             }
-            else if (connectionType == LightningConnectionType.LndREST)
+            else if (connectionType == LightningTestImplementation.LND)
             {
                 if (isMerchant)
                     connectionString = $"type=lnd-rest;server={MerchantLnd.Swagger.BaseUrl};allowinsecure=true";
@@ -140,7 +155,7 @@ namespace BTCPayServer.Tests
                     throw new NotSupportedException();
             }
             else
-                throw new NotSupportedException(connectionType);
+                throw new NotSupportedException(connectionType.ToString());
             return connectionString;
         }
 
@@ -213,7 +228,6 @@ namespace BTCPayServer.Tests
         public ILightningClient CustomerLightningD { get; set; }
 
         public ILightningClient MerchantLightningD { get; private set; }
-        public ChargeTester MerchantCharge { get; private set; }
         public LndMockTester MerchantLnd { get; set; }
 
         internal string GetEnvironment(string variable, string defaultValue)
@@ -264,19 +278,54 @@ namespace BTCPayServer.Tests
 
         public void Dispose()
         {
-            foreach (var r in this.Resources)
-                r.Dispose();
-            TestLogs.LogInformation("Disposing the BTCPayTester...");
-            if (DeleteStore)
+            DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                _ = DisposeCoreAsync();
+            await _disposeCompletion.Task.ConfigureAwait(false);
+        }
+
+        async Task DisposeCoreAsync()
+        {
+            try
             {
-                foreach (var store in Stores)
+                try
                 {
-                    Xunit.Assert.True(PayTester.StoreRepository.DeleteStore(store).GetAwaiter().GetResult());
+                    foreach (var r in this.Resources)
+                        r.Dispose();
+                    TestLogs.LogInformation("Disposing the BTCPayTester...");
+                    if (DeleteStore && !LifetimeToken.IsCancellationRequested)
+                    {
+                        foreach (var store in Stores)
+                        {
+                            Xunit.Assert.True(await PayTester.StoreRepository.DeleteStore(store).ConfigureAwait(false));
+                        }
+                    }
                 }
+                finally
+                {
+                    try
+                    {
+                        if (PayTester is not null)
+                        {
+                            await PayTester.DisposeAsync().ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        _lifetimeCancellation.Dispose();
+                    }
+                }
+                TestLogs.LogInformation("BTCPayTester disposed");
+                _disposeCompletion.TrySetResult();
             }
-            if (PayTester != null)
-                PayTester.Dispose();
-            TestLogs.LogInformation("BTCPayTester disposed");
+            catch (Exception ex)
+            {
+                _disposeCompletion.TrySetException(ex);
+            }
         }
 
         public RPCClient GetExplorerNode(string cryptoCode) =>
@@ -308,6 +357,64 @@ namespace BTCPayServer.Tests
             http.BaseAddress = new Uri($"http://{MailPitSettings.Hostname}:{MailPitSettings.HttpPort}");
             var mailPitClient = new MailPitClient(http);
             return mailPitClient;
+        }
+
+        public async Task InstallHostCommands()
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var btcpayHostCmd = Path.Combine(_Directory, "btcpay-host.cmd");
+                await File.WriteAllTextAsync(btcpayHostCmd, """
+                    @echo off
+                    if "%~1" == "env" (
+                        echo {"deploymentType":"tests","commands":["showauthorizedkeys","setauthorizedkeys"]}
+                        exit /b 0
+                    )
+                    if "%~1" == "showauthorizedkeys" (
+                        powershell -NoProfile -Command "if (Test-Path '%~dp0authorized_keys') { Get-Content -Raw '%~dp0authorized_keys' | ConvertTo-Json -Compress } else { '' | ConvertTo-Json -Compress }"
+                        exit /b 0
+                    )
+                    if "%~1" == "setauthorizedkeys" (
+                        <nul set /p="%~2" > "%~dp0authorized_keys"
+                        exit /b 0
+                    )
+                    echo Unsupported host command: %~1 1>&2
+                    exit /b 1
+                    """);
+                PayTester.btcpayHostExecutable = btcpayHostCmd;
+            }
+            else
+            {
+                var btcpayHost = Path.Combine(_Directory, "btcpay-host");
+                await File.WriteAllTextAsync(btcpayHost, """
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+
+                    authorized_keys_file="$(dirname "$0")/authorized_keys"
+
+                    case "$1" in
+                        env)
+                            printf '{"deploymentType":"tests","commands":["showauthorizedkeys","setauthorizedkeys"]}\n'
+                            ;;
+                        showauthorizedkeys)
+                            value="$(cat "$authorized_keys_file" 2>/dev/null || true)"
+                            value="${value//\\/\\\\}"
+                            value="${value//\"/\\\"}"
+                            value="${value//$'\n'/\\n}"
+                            printf '"%s"\n' "$value"
+                            ;;
+                        setauthorizedkeys)
+                            printf '%s' "$2" > "$authorized_keys_file"
+                            ;;
+                        *)
+                            echo "Unsupported host command: $1" >&2
+                            exit 1
+                            ;;
+                    esac
+                    """);
+                File.SetUnixFileMode(btcpayHost, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                PayTester.btcpayHostExecutable = btcpayHost;
+            }
         }
     }
 }

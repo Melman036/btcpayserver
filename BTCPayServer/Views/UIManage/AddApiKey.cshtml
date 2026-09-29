@@ -1,10 +1,10 @@
-@using BTCPayServer.Client
 @using BTCPayServer.Controllers
 @model UIManageController.AddApiKeyViewModel
 
 @{
     ViewData.SetLayoutModel(new LayoutModel(nameof(ManageNavPages.APIKeys), StringLocalizer["Generate API Key"])
         .SetCategory(nameof(ManageNavPages)));
+    ViewData.SetBreadcrumbs([new(StringLocalizer["API Keys"], Action: nameof(UIManageController.APIKeys))]);
 }
 
 @section PageHeadContent {
@@ -28,15 +28,7 @@
 
 <form method="post" asp-action="AddApiKey" id="Permissions">
     <div class="sticky-header">
-        <nav aria-label="breadcrumb">
-            <ol class="breadcrumb">
-                <li class="breadcrumb-item">
-                    <a asp-action="APIKeys" text-translate="true">API Keys</a>
-                </li>
-                <li class="breadcrumb-item active" aria-current="page">@ViewData["Title"]</li>
-            </ol>
-            <h2>@ViewData["Title"]</h2>
-        </nav>
+		<vc:title-header />
 		<button id="page-primary" type="submit" class="btn btn-primary" text-translate="true">Generate API Key</button>
     </div>
     <p text-translate="true">Generate a new api key to use BTCPay through its API.</p>
@@ -64,7 +56,7 @@
                     {
                         <div class="list-group-item py-3">
                             <input type="hidden" asp-for="PermissionValues[i].Permission" />
-                            @if (Policies.IsStorePolicy(Model.PermissionValues[i].Permission))
+                            @if (Model.PermissionValues[i].IsStorePolicy)
                             {
                                 <input type="hidden" asp-for="PermissionValues[i].StoreMode" value="@Model.PermissionValues[i].StoreMode" />
                                 @if (Model.PermissionValues[i].StoreMode == UIManageController.AddApiKeyViewModel.ApiKeyStoreMode.AllStores)

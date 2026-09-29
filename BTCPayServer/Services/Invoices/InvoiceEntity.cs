@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations.Schema;
 using System.Globalization;
 using System.Linq;
-using System.Text;
 using BTCPayServer.Abstractions;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client.Models;
@@ -12,19 +10,16 @@ using BTCPayServer.JsonConverters;
 using BTCPayServer.Models;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Bitcoin;
-using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Rating;
 using BTCPayServer.Services.Rates;
 using Microsoft.AspNetCore.Mvc;
 using NBitcoin;
 using NBitcoin.DataEncoders;
 using NBitpayClient;
-using NBXplorer;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
-using static BTCPayServer.Controllers.BitpayRateController;
 
 namespace BTCPayServer.Services.Invoices
 {
@@ -54,6 +49,12 @@ namespace BTCPayServer.Services.Invoices
         {
             get => this.GetAdditionalData<string>("orderId");
             set => this.SetAdditionalData("orderId", value);
+        }
+        [JsonIgnore]
+        public string Comment
+        {
+            get => this.GetAdditionalData<string>("comment");
+            set => this.SetAdditionalData("comment", value);
         }
         [JsonIgnore]
         public string OrderUrl
@@ -144,6 +145,12 @@ namespace BTCPayServer.Services.Invoices
         {
             get => this.GetAdditionalData<decimal?>("taxIncluded");
             set => this.SetAdditionalData("taxIncluded", value);
+        }
+        [JsonIgnore]
+        public decimal? TaxOnTip
+        {
+            get => this.GetAdditionalData<decimal?>("taxOnTip");
+            set => this.SetAdditionalData("taxOnTip", value);
         }
 
         /// <summary>
@@ -372,8 +379,8 @@ namespace BTCPayServer.Services.Invoices
             }
             if (paymentMethodId is null)
             {
-                var defaultBTC = PaymentTypes.CHAIN.GetPaymentMethodId(networkProvider.DefaultNetwork.CryptoCode);
-                var defaultLNURLPay = PaymentTypes.LNURL.GetPaymentMethodId(networkProvider.DefaultNetwork.CryptoCode);
+                var defaultBTC = PaymentTypes.CHAIN.GetPaymentMethodId(networkProvider.DefaultCryptoCode);
+                var defaultLNURLPay = PaymentTypes.LNURL.GetPaymentMethodId(networkProvider.DefaultCryptoCode);
                 paymentMethodId = authorized.FirstOrDefault(e => e == defaultBTC) ??
                                   authorized.FirstOrDefault(e => e == defaultLNURLPay) ??
                                   authorized.FirstOrDefault();
@@ -392,6 +399,7 @@ namespace BTCPayServer.Services.Invoices
                 Currency = Currency
             };
             NetSettled = 0.0m;
+            GrossSettled = 0.0m;
             foreach (var payment in GetPayments(false))
             {
                 payment.Rate = GetInvoiceRate(payment.Currency);
@@ -402,7 +410,10 @@ namespace BTCPayServer.Services.Invoices
                     PaidAmount.Gross += payment.InvoicePaidAmount.Gross;
                     PaidAmount.Net += payment.InvoicePaidAmount.Net;
                     if (payment.Status == PaymentStatus.Settled)
+                    {
                         NetSettled += payment.InvoicePaidAmount.Net;
+                        GrossSettled += payment.InvoicePaidAmount.Gross;
+                    }
                 }
             }
             NetDue = Price - PaidAmount.Net;
@@ -758,6 +769,12 @@ namespace BTCPayServer.Services.Invoices
         /// </summary>
         [JsonIgnore]
         public decimal NetSettled { get; private set; }
+
+        /// <summary>
+        /// Same as <see cref="Amounts.Gross"/> of <see cref="PaidAmount"/>, but only counting settled payments.
+        /// </summary>
+        [JsonIgnore]
+        public decimal GrossSettled { get; private set; }
         [JsonIgnore]
         public bool DisableAccounting { get; set; }
 
@@ -842,6 +859,9 @@ namespace BTCPayServer.Services.Invoices
         /// <summary>Total amount of this invoice</summary>
         public decimal TotalDue { get; set; }
 
+        /// <summary>Total amount of this invoice including fees from settled payments only</summary>
+        public decimal TotalDueSettled { get; set; }
+
         /// <summary>Amount of crypto remaining to pay this invoice</summary>
         public decimal Due { get; set; }
 
@@ -858,6 +878,11 @@ namespace BTCPayServer.Services.Invoices
         /// Total amount of the invoice paid after conversion to this crypto currency
         /// </summary>
         public decimal Paid { get; set; }
+
+        /// <summary>
+        /// Same as <see cref="Paid"/>, but only counting settled payments.
+        /// </summary>
+        public decimal PaidSettled { get; set; }
 
         /// <summary>
         /// Total amount of the invoice paid in this currency
@@ -949,7 +974,9 @@ namespace BTCPayServer.Services.Invoices
                 grossDue += rate * PaymentMethodFee;
             }
             accounting.TotalDue = Coins(grossDue / rate, divisibility);
+            accounting.TotalDueSettled = Coins((i.Price + i.GrossSettled - i.NetSettled) / rate, divisibility);
             accounting.Paid = Coins(i.PaidAmount.Gross / rate, divisibility);
+            accounting.PaidSettled = Coins(i.GrossSettled / rate, divisibility);
             accounting.PaymentMethodPaid = Coins(thisPaymentMethodPayments.Sum(p => p.PaidAmount.Gross), divisibility);
 
             // This one deal with the fact where it might looks like a slight over payment due to the dust of another payment method.
@@ -962,6 +989,18 @@ namespace BTCPayServer.Services.Invoices
 
             accounting.MinimumTotalDue = Max(Smallest(divisibility), Coins((grossDue * (1.0m - ((decimal)i.PaymentTolerance / 100.0m))) / rate, divisibility));
             return accounting;
+        }
+
+        public (decimal Paid, decimal TotalDue) CalculateRefundableAmounts()
+        {
+            var accounting = Calculate();
+            if (accounting.PaidSettled is 0 && accounting.Paid is 0 &&
+                ParentEntity is { Status: InvoiceStatus.Settled, ExceptionStatus: InvoiceExceptionStatus.Marked })
+            {
+                return (accounting.TotalDue, 0);
+            }
+
+            return (accounting.PaidSettled, accounting.TotalDueSettled);
         }
 
         private decimal Smallest(int precision)

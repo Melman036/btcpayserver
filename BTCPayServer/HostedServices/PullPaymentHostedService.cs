@@ -7,11 +7,11 @@ using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Data;
+using BTCPayServer.Data.Payouts.LightningLike;
 using BTCPayServer.Events;
 using BTCPayServer.Lightning;
 using BTCPayServer.Logging;
-using BTCPayServer.Models.WalletViewModels;
-using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Wallets.Views.ViewModels;
 using BTCPayServer.Payouts;
 using BTCPayServer.Rating;
 using BTCPayServer.Services;
@@ -19,14 +19,11 @@ using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Notifications;
 using BTCPayServer.Services.Notifications.Blobs;
 using BTCPayServer.Services.Rates;
-using Dapper;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 using NBitcoin.DataEncoders;
 using NBXplorer;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PayoutData = BTCPayServer.Data.PayoutData;
 using PullPaymentData = BTCPayServer.Data.PullPaymentData;
@@ -43,7 +40,13 @@ namespace BTCPayServer.HostedServices
             public CancelRequest(string pullPaymentId)
             {
                 ArgumentNullException.ThrowIfNull(pullPaymentId);
-                PullPaymentId = pullPaymentId;
+                PullPaymentIds = new[] { pullPaymentId };
+            }
+
+            public CancelRequest(string[] pullPaymentIds)
+            {
+                ArgumentNullException.ThrowIfNull(pullPaymentIds);
+                PullPaymentIds = pullPaymentIds;
             }
 
             public CancelRequest(string[] payoutIds, string[] storeIds)
@@ -54,8 +57,7 @@ namespace BTCPayServer.HostedServices
             }
 
             public string[] StoreIds { get; set; }
-
-            public string PullPaymentId { get; set; }
+            public string[] PullPaymentIds { get; set; }
             public string[] PayoutIds { get; set; }
             internal TaskCompletionSource<Dictionary<string, MarkPayoutRequest.PayoutPaidResult>> Completion { get; set; }
         }
@@ -99,6 +101,27 @@ namespace BTCPayServer.HostedServices
         }
         public async Task<string> CreatePullPayment(Data.StoreData store, CreatePullPaymentRequest create)
         {
+            return (await CreatePullPaymentCore(store, create)).Id;
+        }
+
+        public async Task<string> CreateRefundPullPayment(Data.StoreData store, CreatePullPaymentRequest create, string invoiceId)
+        {
+            var pullPayment = await CreatePullPaymentCore(store, create);
+            await using var ctx = _dbContextFactory.CreateContext();
+            ctx.Refunds.Add(new RefundData()
+            {
+                InvoiceDataId = invoiceId,
+                PullPaymentDataId = pullPayment.Id
+            });
+            await ctx.SaveChangesAsync();
+            var invoice = await _invoiceRepository.GetInvoice(invoiceId);
+            if (invoice is not null)
+                _eventAggregator.Publish(new Events.InvoiceEvent(invoice, Events.InvoiceEvent.Refund) { PullPaymentId = pullPayment.Id });
+            return pullPayment.Id;
+        }
+
+        private async Task<Data.PullPaymentData> CreatePullPaymentCore(Data.StoreData store, CreatePullPaymentRequest create)
+        {
             var supported = this._handlers.GetSupportedPayoutMethods(store);
             create.PayoutMethods ??= supported.Select(s => s.ToString()).ToArray();
             create.PayoutMethods = create.PayoutMethods.Where(pm => _handlers.Support(PayoutMethodId.Parse(pm))).ToArray();
@@ -135,7 +158,7 @@ namespace BTCPayServer.HostedServices
             });
             ctx.PullPayments.Add(o);
             await ctx.SaveChangesAsync();
-            return o.Id;
+            return o;
         }
 
         public class PayoutQuery
@@ -295,7 +318,8 @@ namespace BTCPayServer.HostedServices
             ILogger<PullPaymentHostedService> logger,
             Logs logs,
             DisplayFormatter displayFormatter,
-            CurrencyNameTable currencyNameTable) : base(logs)
+            CurrencyNameTable currencyNameTable,
+            Services.Invoices.InvoiceRepository invoiceRepository) : base(logs)
         {
             _dbContextFactory = dbContextFactory;
             _jsonSerializerSettings = jsonSerializerSettings;
@@ -308,6 +332,7 @@ namespace BTCPayServer.HostedServices
             _logger = logger;
             _currencyNameTable = currencyNameTable;
             _displayFormatter = displayFormatter;
+            _invoiceRepository = invoiceRepository;
         }
 
         Channel<object> _Channel;
@@ -322,6 +347,7 @@ namespace BTCPayServer.HostedServices
         private readonly ILogger<PullPaymentHostedService> _logger;
         private readonly CurrencyNameTable _currencyNameTable;
         private readonly DisplayFormatter _displayFormatter;
+        private readonly Services.Invoices.InvoiceRepository _invoiceRepository;
         private readonly CompositeDisposable _subscriptions = new CompositeDisposable();
 
         internal override Task[] InitializeTasks()
@@ -430,9 +456,11 @@ namespace BTCPayServer.HostedServices
 
         public bool SupportsLNURL(PullPaymentData pp, PullPaymentBlob blob = null)
         {
+            var cryptoCode = _networkProvider.DefaultNetwork?.CryptoCode;
+            if (cryptoCode is null) return false;
             blob ??= pp.GetBlob();
             var pms = blob.SupportedPayoutMethods.FirstOrDefault(id =>
-                PayoutTypes.LN.GetPayoutMethodId(_networkProvider.DefaultNetwork.CryptoCode)
+                PayoutTypes.LN.GetPayoutMethodId(cryptoCode)
                 == id);
             return pms is not null && _lnurlSupportedCurrencies.Contains(pp.Currency);
         }
@@ -534,7 +562,7 @@ namespace BTCPayServer.HostedServices
                 }
 
                 payout.Amount = Extensions.RoundUp(cryptoAmount,
-                    network.Divisibility);
+                    payoutHandler is LightningLikePayoutHandler ? network.Divisibility + 3 : network.Divisibility);
                 await ctx.SaveChangesAsync();
 
                 _eventAggregator.Publish(new PayoutEvent(PayoutEvent.PayoutEventType.Approved, payout));
@@ -770,13 +798,21 @@ namespace BTCPayServer.HostedServices
             {
                 using var ctx = this._dbContextFactory.CreateContext();
                 List<PayoutData> payouts = null;
-                if (cancel.PullPaymentId != null)
+                if (cancel.PullPaymentIds != null)
                 {
-                    ctx.PullPayments.Attach(new Data.PullPaymentData() { Id = cancel.PullPaymentId, Archived = true })
-                        .Property(o => o.Archived).IsModified = true;
+                    var ppIds = cancel.StoreIds == null
+                        ? cancel.PullPaymentIds
+                        : (await ctx.PullPayments
+                            .Where(pp => cancel.PullPaymentIds.Contains(pp.Id) && cancel.StoreIds.Contains(pp.StoreId))
+                            .Select(pp => pp.Id)
+                            .ToListAsync()).ToArray();
+                    var archivedPullPayments = await ctx.PullPayments
+                        .Where(pp => ppIds.Contains(pp.Id))
+                        .ToListAsync();
+                    foreach (var pp in archivedPullPayments)
+                        pp.Archived = true;
                     payouts = await ctx.Payouts
-                        .Where(p => p.PullPaymentDataId == cancel.PullPaymentId)
-                        .Where(p => cancel.StoreIds == null || cancel.StoreIds.Contains(p.StoreDataId))
+                        .Where(p => ppIds.Contains(p.PullPaymentDataId))
                         .ToListAsync();
 
                     cancel.PayoutIds = payouts.Select(data => data.Id).ToArray();
